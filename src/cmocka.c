@@ -138,12 +138,12 @@
 /* Printf format used to display intmax_t as a signed decimal. */
 #ifndef IntMaxTypePrintfFormatDecimal
 # ifdef _WIN32
-#  define IntMaxTypePrintfFormatDecimal "%I64"
+#  define IntMaxTypePrintfFormatDecimal "%I64i"
 # else
 #  if __WORDSIZE == 64
-#   define IntMaxTypePrintfFormatDecimal "%l"
+#   define IntMaxTypePrintfFormatDecimal "%li"
 #  else
-#   define IntMaxTypePrintfFormatDecimal "%ll"
+#   define IntMaxTypePrintfFormatDecimal "%lli"
 #  endif
 # endif /* _WIN32 */
 #endif /* IntMaxTypePrintfFormat */
