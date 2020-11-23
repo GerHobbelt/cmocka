@@ -39,11 +39,27 @@ static void test_value_range(void **state)
     assert_in_range(a, 0, 100);
 }
 
+static void test_value_signed_range(void **state)
+{
+    int a = (*((int *)*state) * (-1));
+
+    assert_in_signed_range(a, -100, 100);
+}
+
+static void test_value_not_in_signed_range(void **state)
+{
+    int a = (*((int *)*state) * (-1));
+
+    assert_not_in_signed_range(a, -10, 10);
+}
+
 int main(void) {
     int prestate = 1337;
     const struct CMUnitTest tests[] = {
         cmocka_unit_test(test_value_equal),
         cmocka_unit_test(test_value_range),
+        cmocka_unit_test(test_value_signed_range),
+        cmocka_unit_test(test_value_not_in_signed_range),
 	cmocka_unit_test_prestate(test_value_equal, &prestate),
     };
 

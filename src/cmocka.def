@@ -5,12 +5,14 @@ EXPORTS
     _assert_float_equal
     _assert_float_not_equal
     _assert_in_range
+    _assert_in_signed_range
     _assert_in_set
     _assert_int_equal
     _assert_int_not_equal
     _assert_memory_equal
     _assert_memory_not_equal
     _assert_not_in_range
+    _assert_not_in_signed_range
     _assert_not_in_set
     _assert_return_code
     _assert_string_equal
