@@ -121,7 +121,7 @@ typedef uintmax_t LargestIntegralType;
     /* WIN32 is an ILP32 platform */
     typedef unsigned int uintptr_t;
 # elif defined(_WIN64)
-    typedef unsigned long int uintptr_t
+    typedef unsigned long int uintptr_t;
 # else /* _WIN32 */
 
 /* ILP32 and LP64 platforms */
@@ -213,8 +213,8 @@ cast_to_largest_integral_type(cast_to_pointer_integral_type(value))
  * }
  * @endcode
  *
- * For a complete example please at a look
- * <a href="http://git.cryptomilk.org/projects/cmocka.git/tree/example/chef_wrap/waiter_test_wrap.c">here</a>.
+ * For a complete example please take a look
+ * <a href="https://git.cryptomilk.org/projects/cmocka.git/tree/example/mock">here</a>.
  *
  * @{
  */
@@ -430,8 +430,8 @@ void will_return_maybe(#function, LargestIntegralType value);
  * }
  * @endcode
  *
- * For a complete example please at a look at
- * <a href="http://git.cryptomilk.org/projects/cmocka.git/tree/example/chef_wrap/waiter_test_wrap.c">here</a>
+ * For a complete example please take a look
+ * <a href="https://git.cryptomilk.org/projects/cmocka.git/tree/example/mock">here</a>
  *
  * @{
  */

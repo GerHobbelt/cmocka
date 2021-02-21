@@ -15,7 +15,7 @@ include(DefineCMakeDefaults)
 include(DefineCompilerFlags)
 include(DefinePlatformDefaults)
 
-project(cmocka VERSION 1.1.3 LANGUAGES C)
+project(cmocka VERSION 1.1.4 LANGUAGES C)
 
 # global needed variables
 set(APPLICATION_NAME ${PROJECT_NAME})
@@ -27,7 +27,7 @@ set(APPLICATION_NAME ${PROJECT_NAME})
 #     Increment AGE. Set REVISION to 0
 #   If the source code was changed, but there were no interface changes:
 #     Increment REVISION.
-set(LIBRARY_VERSION "0.5.1")
+set(LIBRARY_VERSION "0.6.0")
 set(LIBRARY_SOVERSION "0")
 
 # include cmake files
@@ -76,7 +76,11 @@ install(
 )
 
 # cmake config files
-set(CMOCKA_LIBRARY_NAME ${CMAKE_SHARED_LIBRARY_PREFIX}${PROJECT_NAME}${CMAKE_SHARED_LIBRARY_SUFFIX})
+if (WIN32)
+    set(CMOCKA_LIBRARY_NAME ${CMAKE_SHARED_LIBRARY_PREFIX}${PROJECT_NAME}${CMAKE_IMPORT_LIBRARY_SUFFIX})
+else()
+    set(CMOCKA_LIBRARY_NAME ${CMAKE_SHARED_LIBRARY_PREFIX}${PROJECT_NAME}${CMAKE_SHARED_LIBRARY_SUFFIX})
+endif()
 
 set(INCLUDE_INSTALL_DIR ${CMAKE_INSTALL_INCLUDEDIR} CACHE INTERNAL "")
 set(LIB_INSTALL_DIR ${CMAKE_INSTALL_LIBDIR} CACHE INTERNAL "")
