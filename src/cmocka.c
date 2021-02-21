@@ -135,6 +135,19 @@
 # endif /* _WIN32 */
 #endif /* UintMaxTypePrintfFormat */
 
+/* Printf format used to display intmax_t as a signed decimal. */
+#ifndef IntMaxTypePrintfFormatDecimal
+# ifdef _WIN32
+#  define IntMaxTypePrintfFormatDecimal "%I64i"
+# else
+#  if __WORDSIZE == 64
+#   define IntMaxTypePrintfFormatDecimal "%li"
+#  else
+#   define IntMaxTypePrintfFormatDecimal "%lli"
+#  endif
+# endif /* _WIN32 */
+#endif /* IntMaxTypePrintfFormat */
+
 #ifndef FloatPrintfFormat
 # define FloatPrintfFormat "%f"
 #endif /* FloatPrintfFormat */
@@ -1379,6 +1392,48 @@ static int integer_not_in_range_display_error(
 }
 
 
+
+/*
+ * Determine whether a signed value is within the specified range.  If the
+ * signed value is within the specified range 1 is returned.  If the signed 
+ * value isn't within the specified range an error is displayed and 0 is 
+ * returned.
+ */
+static int signed_integer_in_range_display_error(
+        const intmax_t value, const intmax_t range_min,
+        const intmax_t range_max) {
+    if (value >= range_min && value <= range_max) {
+        return 1;
+    }
+    cm_print_error(IntMaxTypePrintfFormatDecimal
+                   " is not within the range "
+                   IntMaxTypePrintfFormatDecimal "-"
+                   IntMaxTypePrintfFormatDecimal "\n",
+                   value, range_min, range_max);
+    return 0;
+}
+
+
+/*
+ * Determine whether a signed value is within the specified range.  If the 
+ * signed value is not within the range 1 is returned.  If the signed value is
+ * within the specified range an error is displayed and zero is returned.
+ */
+static int signed_integer_not_in_range_display_error(
+        const intmax_t value, const intmax_t range_min,
+        const intmax_t range_max) {
+    if (value < range_min || value > range_max) {
+        return 1;
+    }
+    cm_print_error(IntMaxTypePrintfFormatDecimal
+                   " is within the range "
+                   IntMaxTypePrintfFormatDecimal "-"
+                   IntMaxTypePrintfFormatDecimal "\n",
+                   value, range_min, range_max);
+
+    return 0;
+}
+
 /*
  * Determine whether the specified strings are equal.  If the strings are equal
  * 1 is returned.  If they're not equal an error is displayed and 0 is
@@ -1950,6 +2005,24 @@ void _assert_not_in_range(
         const uintmax_t maximum, const char* const file,
         const int line) {
     if (!integer_not_in_range_display_error(value, minimum, maximum)) {
+        _fail(file, line);
+    }
+}
+
+void _assert_in_signed_range(
+        const intmax_t value, const intmax_t minimum,
+        const intmax_t maximum, const char* const file,
+        const int line) {
+    if (!signed_integer_in_range_display_error(value, minimum, maximum)) {
+        _fail(file, line);
+    }
+}
+
+void _assert_not_in_signed_range(
+        const intmax_t value, const intmax_t minimum,
+        const intmax_t maximum, const char* const file,
+        const int line) {
+    if (!signed_integer_not_in_range_display_error(value, minimum, maximum)) {
         _fail(file, line);
     }
 }
