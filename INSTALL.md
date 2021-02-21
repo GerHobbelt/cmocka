@@ -13,6 +13,7 @@ Note that these version numbers are version we know works correctly. If you
 build and run cmocka successfully with an older version, please let us know.
 
 ## Building
+
 First, you need to configure the compilation, using CMake. Go inside the
 `build` dir. Create it if it doesn't exist.
 
@@ -23,13 +24,27 @@ GNU/Linux, MacOS X, MSYS/MinGW:
 
 On Windows you should choose a makefile gernerator with -G, for example:
 
-   cmake -G "Visual Studio 12 2013" -DCMAKE_BUILD_TYPE=Debug /path/to/source
+   cmake -G "Visual Studio 12 2013" -DCMAKE_BUILD_TYPE=Debug ..
 
 You can also use the CMake GUI which is shipped with CMake. It will list all
 available generators for MSVC on Windows. We only support Visual Studio 2013
 or newer which supports C99.
 
+When the `cmake` command fails, use the GUI to *Configure* CMake:
+
+- Go to the `build` dir
+- On Windows: run `cmakesetup` or `cmake-gui`
+- On GNU/Linux and MacOS X: run `ccmake ..`
+- Click the `Browse Source` button to point CMake at the source directory (`../`)
+- Click the `Configure` button to have CMake (auto-)detect your dev environment, e.g.
+  "Visual Studio 16 2019"
+- After some work is done (log shown in bottom panel of the GUI), the CMake
+  configuration settings show up as a list. Change what you like.
+- Click the `Generate` button to finally generate the build files (project files, etc.
+  when you use Visual Studio).
+
 ### CMake standard options
+
 Here is a list of the most interesting options provided out of the box by
 CMake.
 
@@ -57,7 +72,7 @@ CMake options using `cmakesetup` (Windows), `cmake-gui` or `ccmake` (GNU/Linux
 and MacOS X).
 
 - Go to the build dir
-- On Windows: run `cmakesetup`
+- On Windows: run `cmakesetup` or `cmake-gui`
 - On GNU/Linux and MacOS X: run `ccmake ..`
 
 ## Installing
