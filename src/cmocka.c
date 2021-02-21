@@ -567,7 +567,7 @@ static void fail_if_leftover_values(const char *test_name) {
 
     remove_always_return_values_from_list(&global_call_ordering_head);
     if (check_for_leftover_values_list(&global_call_ordering_head,
-        "%s function was expected to be called but was not not.\n")) {
+        "%s function was expected to be called but was not.\n")) {
         error_occurred = 1;
     }
     if (error_occurred) {
@@ -898,7 +898,7 @@ static size_t check_for_leftover_values_list(const ListNode * head,
                  child_node = child_node->next, ++leftover_count) {
             const FuncOrderingValue *const o =
                     (const FuncOrderingValue*) child_node->value;
-            cm_print_error(error_message, o->function);
+            cm_print_error(error_message, "%s", o->function);
             cm_print_error(SOURCE_LOCATION_FORMAT
                     ": note: remaining item was declared here\n",
                     o->location.file, o->location.line);
@@ -930,7 +930,7 @@ static size_t check_for_leftover_values(
         if (!list_empty(child_list)) {
             if (number_of_symbol_names == 1) {
                 const ListNode *child_node;
-                cm_print_error(error_message, value->symbol_name);
+                cm_print_error(error_message, "%s", value->symbol_name);
 
                 for (child_node = child_list->next; child_node != child_list;
                      child_node = child_node->next) {
