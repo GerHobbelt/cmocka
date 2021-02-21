@@ -70,7 +70,9 @@
 #define MALLOC_ALLOC_PATTERN 0xBA
 #define MALLOC_FREE_PATTERN 0xCD
 /* Alignment of allocated blocks.  NOTE: This must be base2. */
+#ifndef MALLOC_ALIGNMENT
 #define MALLOC_ALIGNMENT sizeof(size_t)
+#endif
 
 /* Printf formatting for source code locations. */
 #define SOURCE_LOCATION_FORMAT "%s:%u"
@@ -720,9 +722,16 @@ static void free_symbol_map_value(const void *value,
     SymbolMapValue * const map_value = (SymbolMapValue*)value;
     const LargestIntegralType children = cast_ptr_to_largest_integral_type(cleanup_value_data);
     assert_non_null(value);
-    list_free(&map_value->symbol_values_list_head,
-              children ? free_symbol_map_value : free_value,
-              (void *) ((uintptr_t)children - 1));
+    if (children == 0) {
+        list_free(&map_value->symbol_values_list_head,
+                  free_value,
+                  NULL);
+    } else {
+        list_free(&map_value->symbol_values_list_head,
+                  free_symbol_map_value,
+                  (void *)((uintptr_t)children - 1));
+    }
+
     free(map_value);
 }
 
@@ -1146,10 +1155,10 @@ static int float_compare(const float left,
     absLeft = (left >= 0.f) ? left : -left;
     absRight = (right >= 0.f) ? right : -right;
 
-        largest = (absRight > absLeft) ? absRight : absLeft;
+    largest = (absRight > absLeft) ? absRight : absLeft;
     relDiff = largest * FLT_EPSILON;
 
-        if (diff > relDiff) {
+    if (diff > relDiff) {
         return 0;
     }
     return 1;
@@ -1178,6 +1187,73 @@ static int float_values_not_equal_display_error(const float left,
         cm_print_error(FloatPrintfFormat " == "
                    FloatPrintfFormat "\n", left, right);
     }
+    return not_equal;
+}
+
+/* Returns 1 if the specified double values are equal, else returns 0. */
+static int double_compare(const double left,
+                          const double right,
+                          const double epsilon) {
+    double absLeft;
+    double absRight;
+    double largest;
+    double relDiff;
+
+    double diff = left - right;
+    diff = (diff >= 0.f) ? diff : -diff;
+
+    /*
+     * Check if the numbers are really close -- needed
+     * when comparing numbers near zero.
+     */
+    if (diff <= epsilon) {
+        return 1;
+    }
+
+    absLeft = (left >= 0.f) ? left : -left;
+    absRight = (right >= 0.f) ? right : -right;
+
+    largest = (absRight > absLeft) ? absRight : absLeft;
+    relDiff = largest * FLT_EPSILON;
+
+    if (diff > relDiff) {
+        return 0;
+    }
+
+    return 1;
+}
+
+/*
+ * Returns 1 if the specified double values are equal. If the values are not
+ * equal an error is displayed and 0 is returned.
+ */
+static int double_values_equal_display_error(const double left,
+                                             const double right,
+                                             const double epsilon) {
+    const int equal = double_compare(left, right, epsilon);
+
+    if (!equal) {
+        cm_print_error(DoublePrintfFormat " != "
+                   DoublePrintfFormat "\n", left, right);
+    }
+
+    return equal;
+}
+
+/*
+ * Returns 1 if the specified double values are different. If the values are
+ * equal an error is displayed and 0 is returned.
+ */
+static int double_values_not_equal_display_error(const double left,
+                                                 const double right,
+                                                 const double epsilon) {
+    const int not_equal = (double_compare(left, right, epsilon) == 0);
+
+    if (!not_equal) {
+        cm_print_error(DoublePrintfFormat " == "
+                   DoublePrintfFormat "\n", left, right);
+    }
+
     return not_equal;
 }
 
@@ -1789,6 +1865,26 @@ void _assert_float_not_equal(const float a,
                              const char * const file,
                              const int line) {
     if (!float_values_not_equal_display_error(a, b, epsilon)) {
+        _fail(file, line);
+    }
+}
+
+void _assert_double_equal(const double a,
+                          const double b,
+                          const double epsilon,
+                          const char * const file,
+                          const int line) {
+    if (!double_values_equal_display_error(a, b, epsilon)) {
+        _fail(file, line);
+    }
+}
+
+void _assert_double_not_equal(const double a,
+                              const double b,
+                              const double epsilon,
+                              const char * const file,
+                              const int line) {
+    if (!double_values_not_equal_display_error(a, b, epsilon)) {
         _fail(file, line);
     }
 }
@@ -2434,13 +2530,16 @@ static void cmprintf_group_finish_xml(const char *group_name,
     }
 }
 
-static void cmprintf_group_start_standard(const size_t num_tests)
+static void cmprintf_group_start_standard(const char *group_name,
+                                          const size_t num_tests)
 {
-    print_message("[==========] Running %u test(s).\n",
-                  (unsigned)num_tests);
+    print_message("[==========] %s: Running %zu test(s).\n",
+                  group_name,
+                  num_tests);
 }
 
-static void cmprintf_group_finish_standard(size_t total_executed,
+static void cmprintf_group_finish_standard(const char *group_name,
+                                           size_t total_executed,
                                            size_t total_passed,
                                            size_t total_failed,
                                            size_t total_errors,
@@ -2449,12 +2548,16 @@ static void cmprintf_group_finish_standard(size_t total_executed,
 {
     size_t i;
 
-    print_message("[==========] %u test(s) run.\n", (unsigned)total_executed);
+    print_message("[==========] %s: %zu test(s) run.\n",
+                  group_name,
+                  total_executed);
     print_error("[  PASSED  ] %u test(s).\n",
                 (unsigned)(total_passed));
 
     if (total_skipped) {
-        print_error("[  SKIPPED ] %"PRIdS " test(s), listed below:\n", total_skipped);
+        print_error("[  SKIPPED ] %s: %zu test(s), listed below:\n",
+                    group_name,
+                    total_skipped);
         for (i = 0; i < total_executed; i++) {
             struct CMUnitTestState *cmtest = &cm_tests[i];
 
@@ -2462,11 +2565,13 @@ static void cmprintf_group_finish_standard(size_t total_executed,
                 print_error("[  SKIPPED ] %s\n", cmtest->test->name);
             }
         }
-        print_error("\n %u SKIPPED TEST(S)\n", (unsigned)(total_skipped));
+        print_error("\n %zu SKIPPED TEST(S)\n", total_skipped);
     }
 
     if (total_failed) {
-        print_error("[  FAILED  ] %"PRIdS " test(s), listed below:\n", total_failed);
+        print_error("[  FAILED  ] %s: %zu test(s), listed below:\n",
+                    group_name,
+                    total_failed);
         for (i = 0; i < total_executed; i++) {
             struct CMUnitTestState *cmtest = &cm_tests[i];
 
@@ -2474,8 +2579,8 @@ static void cmprintf_group_finish_standard(size_t total_executed,
                 print_error("[  FAILED  ] %s\n", cmtest->test->name);
             }
         }
-        print_error("\n %u FAILED TEST(S)\n",
-                    (unsigned)(total_failed + total_errors));
+        print_error("\n %zu FAILED TEST(S)\n",
+                    (total_failed + total_errors));
     }
 }
 
@@ -2526,7 +2631,7 @@ static void cmprintf_group_finish_tap(const char *group_name,
 }
 
 static void cmprintf_tap(enum cm_printf_type type,
-                         uint32_t test_number,
+                         size_t test_number,
                          const char *test_name,
                          const char *error_message)
 {
@@ -2602,7 +2707,8 @@ static void cmprintf_subunit(enum cm_printf_type type,
     }
 }
 
-static void cmprintf_group_start(const size_t num_tests)
+static void cmprintf_group_start(const char *group_name,
+                                 const size_t num_tests)
 {
     enum cm_message_output output;
 
@@ -2610,7 +2716,7 @@ static void cmprintf_group_start(const size_t num_tests)
 
     switch (output) {
     case CM_OUTPUT_STDOUT:
-        cmprintf_group_start_standard(num_tests);
+        cmprintf_group_start_standard(group_name, num_tests);
         break;
     case CM_OUTPUT_SUBUNIT:
         break;
@@ -2637,17 +2743,21 @@ static void cmprintf_group_finish(const char *group_name,
 
     switch (output) {
     case CM_OUTPUT_STDOUT:
-        cmprintf_group_finish_standard(total_executed,
-                                    total_passed,
-                                    total_failed,
-                                    total_errors,
-                                    total_skipped,
-                                    cm_tests);
+        cmprintf_group_finish_standard(group_name,
+                                       total_executed,
+                                       total_passed,
+                                       total_failed,
+                                       total_errors,
+                                       total_skipped,
+                                       cm_tests);
         break;
     case CM_OUTPUT_SUBUNIT:
         break;
     case CM_OUTPUT_TAP:
-        cmprintf_group_finish_tap(group_name, total_executed, total_passed, total_skipped);
+        cmprintf_group_finish_tap(group_name,
+                                  total_executed,
+                                  total_passed,
+                                  total_skipped);
         break;
     case CM_OUTPUT_XML:
         cmprintf_group_finish_xml(group_name,
@@ -2743,7 +2853,7 @@ static double cm_secdiff(struct timespec clock1, struct timespec clock0)
 
     diff = cm_tspecdiff(clock1, clock0);
 
-    ret = diff.tv_sec;
+    ret = (double) diff.tv_sec;
     ret += (double) diff.tv_nsec / (double) 1E9;
 
     return ret;
@@ -3010,7 +3120,7 @@ int _cmocka_run_group_tests(const char *group_name,
         }
     }
 
-    cmprintf_group_start(total_tests);
+    cmprintf_group_start(group_name, total_tests);
 
     rc = 0;
 
@@ -3129,7 +3239,7 @@ int _cmocka_run_group_tests(const char *group_name,
     libc_free(cm_tests);
     fail_if_blocks_allocated(group_check_point, "cmocka_group_tests");
 
-    return total_failed + total_errors;
+    return (int)(total_failed + total_errors);
 }
 
 /****************************************************************************
@@ -3371,7 +3481,7 @@ int _run_tests(const UnitTest * const tests, const size_t number_of_tests) {
 int _run_group_tests(const UnitTest * const tests, const size_t number_of_tests)
 {
     UnitTestFunction setup = NULL;
-    const char *setup_name;
+    const char *setup_name = NULL;
     size_t num_setups = 0;
     UnitTestFunction teardown = NULL;
     const char *teardown_name = NULL;
