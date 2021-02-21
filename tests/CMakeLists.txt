@@ -27,9 +27,9 @@ set(CMOCKA_TESTS
     test_ordering_fail
     test_returns
     test_returns_fail
+    test_string
     test_wildcard
     test_skip_filter
-    test_cmockery
     )
 
 if (TEST_EXCEPTION_HANDLER)
@@ -46,11 +46,6 @@ foreach(_CMOCKA_TEST ${CMOCKA_TESTS})
 
     add_cmocka_test_environment(${_CMOCKA_TEST})
 endforeach()
-
-### Special Cases
-if (${CMAKE_C_COMPILER_ID} MATCHES "(GNU|Clang)")
-    set_source_files_properties(test_cmockery.c PROPERTIES COMPILE_FLAGS "-Wno-deprecated-declarations")
-endif()
 
 ### Exceptions
 
@@ -174,16 +169,19 @@ set(TEST_OUTPUT_FMTS
     xml)
 
 set(test_basics_tap_out
-    "^1\\.\\.2"
+    "^TAP version 13"
+    "1\\.\\.2"
     "ok 1 - null_test_success"
     "ok 2 - int_test_success"
     "# ok - tests")
 set(test_assert_macros_fail_tap_out
-    "^1\\.\\.1"
+    "^TAP version 13"
+    "1\\.\\.1"
     "not ok 1 - test_assert_return_code_fail"
     "#[^\n\r]+[\n\r]#[^\n\r]+[\n\r]# not ok - tests")
 set(test_groups_tap_out
-    "^1\\.\\.1"
+    "^TAP version 13"
+    "1\\.\\.1"
     "ok 1 - null_test_success"
     "# ok - test_group1"
     "1\\.\\.1"
