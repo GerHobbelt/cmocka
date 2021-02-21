@@ -110,37 +110,17 @@
 
 
 /*
- * Declare and initialize the pointer member of ValuePointer variable name
- * with ptr.
+ * Declare and initialize a LargestIntegralType variable name
+ * with value the conversion of ptr.
  */
 #define declare_initialize_value_pointer_pointer(name, ptr) \
-    ValuePointer name ; \
-    name.value = 0; \
-    name.x.pointer = (void*)(ptr)
+    LargestIntegralType name ; \
+    name = (LargestIntegralType) (uintptr_t) ptr
 
-/*
- * Declare and initialize the value member of ValuePointer variable name
- * with val.
- */
-#define declare_initialize_value_pointer_value(name, val) \
-    ValuePointer name ; \
-    name.value = val
-
-/* Cast a LargestIntegralType to pointer_type via a ValuePointer. */
+/* Cast a LargestIntegralType to pointer_type. */
 #define cast_largest_integral_type_to_pointer( \
     pointer_type, largest_integral_type) \
-    ((pointer_type)((ValuePointer*)&(largest_integral_type))->x.pointer)
-
-/* Used to cast LargetIntegralType to void* and vice versa. */
-typedef union ValuePointer {
-    LargestIntegralType value;
-    struct {
-#if defined(WORDS_BIGENDIAN) && (WORDS_SIZEOF_VOID_P == 4)
-        unsigned int padding;
-#endif
-        void *pointer;
-    } x;
-} ValuePointer;
+    ((pointer_type)(uintptr_t)(largest_integral_type))
 
 /* Doubly linked list node. */
 typedef struct ListNode {
@@ -416,6 +396,9 @@ void _skip(const char * const file, const int line)
     cm_print_error(SOURCE_LOCATION_FORMAT ": Skipped!\n", file, line);
     global_skip_test = 1;
     exit_test(1);
+
+    /* Unreachable */
+    exit(-1);
 }
 
 /* Initialize a SourceLocation structure. */
@@ -1486,7 +1469,7 @@ static void expect_set(
     check_integer_set->size_of_set = number_of_values;
     _expect_check(
         function, parameter, file, line, check_function,
-        check_data.value, &check_integer_set->event, count);
+        check_data, &check_integer_set->event, count);
 }
 
 
@@ -1549,7 +1532,7 @@ static void expect_range(
     check_integer_range->minimum = minimum;
     check_integer_range->maximum = maximum;
     _expect_check(function, parameter, file, line, check_function,
-                  check_data.value, &check_integer_range->event, count);
+                  check_data, &check_integer_range->event, count);
 }
 
 
@@ -1628,7 +1611,7 @@ void _expect_string(
     declare_initialize_value_pointer_pointer(string_pointer,
                                              discard_const(string));
     _expect_check(function, parameter, file, line, check_string,
-                  string_pointer.value, NULL, count);
+                  string_pointer, NULL, count);
 }
 
 
@@ -1650,7 +1633,7 @@ void _expect_not_string(
     declare_initialize_value_pointer_pointer(string_pointer,
                                              discard_const(string));
     _expect_check(function, parameter, file, line, check_not_string,
-                  string_pointer.value, NULL, count);
+                  string_pointer, NULL, count);
 }
 
 /* CheckParameterValue callback to check whether a parameter equals an area of
@@ -1683,7 +1666,7 @@ static void expect_memory_setup(
     check_data->memory = mem;
     check_data->size = size;
     _expect_check(function, parameter, file, line, check_function,
-                  check_data_pointer.value, &check_data->event, count);
+                  check_data_pointer, &check_data->event, count);
 }
 
 
@@ -2290,11 +2273,14 @@ void _fail(const char * const file, const int line) {
             break;
     }
     exit_test(1);
+
+    /* Unreachable */
+    exit(-1);
 }
 
 
 #ifndef _WIN32
-static void exception_handler(int sig) {
+CMOCKA_NORETURN static void exception_handler(int sig) {
     const char *sig_strerror = "";
 
 #ifdef HAVE_STRSIGNAL
@@ -2304,6 +2290,9 @@ static void exception_handler(int sig) {
     cm_print_error("Test failed with exception: %s(%d)",
                    sig_strerror, sig);
     exit_test(1);
+
+    /* Unreachable */
+    exit(-1);
 }
 
 #else /* _WIN32 */
@@ -2672,7 +2661,7 @@ static void cmprintf_tap(enum cm_printf_type type,
         }
         break;
     case PRINTF_TEST_SKIPPED:
-        print_message("not ok %u # SKIP %s\n", (unsigned)test_number, test_name);
+        print_message("ok %u # SKIP %s\n", (unsigned)test_number, test_name);
         break;
     case PRINTF_TEST_ERROR:
         print_message("not ok %u - %s %s\n",
