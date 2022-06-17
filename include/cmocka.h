@@ -1,5 +1,6 @@
 /*
  * Copyright 2008 Google Inc.
+ * Copyright 2014-2018 Andreas Schneider <asn@cryptomilk.org>
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,6 +19,8 @@
 
 #ifdef _WIN32
 # ifdef _MSC_VER
+
+#define __func__ __FUNCTION__
 
 # ifndef inline
 #define inline __inline
@@ -38,12 +41,13 @@ int __stdcall IsDebuggerPresent();
 /**
  * @defgroup cmocka The CMocka API
  *
- * These headers or their equivalents should be included prior to including
+ * These headers or their equivalents MUST be included prior to including
  * this header file.
  * @code
  * #include <stdarg.h>
  * #include <stddef.h>
  * #include <setjmp.h>
+ * #include <stdint.h>
  * @endcode
  *
  * This allows test applications to use custom definitions of C standard
@@ -52,14 +56,9 @@ int __stdcall IsDebuggerPresent();
  * @{
  */
 
-/* For those who are used to __func__ from gcc. */
-#ifndef __func__
-#define __func__ __FUNCTION__
-#endif
-
 /* If __WORDSIZE is not set, try to figure it out and default to 32 bit. */
 #ifndef __WORDSIZE
-# if defined(__x86_64__) && !defined(__ILP32__)
+# if (defined(__x86_64__) && !defined(__ILP32__)) || defined(__sparc_v9__) || defined(__sparcv9)
 #  define __WORDSIZE 64
 # else
 #  define __WORDSIZE 32
@@ -74,7 +73,7 @@ int __stdcall IsDebuggerPresent();
 typedef uintmax_t LargestIntegralType;
 #else /* DOXGEN */
 #ifndef LargestIntegralType
-# if __WORDSIZE == 64
+# if __WORDSIZE == 64 && !defined(_WIN64)
 #  define LargestIntegralType unsigned long int
 # else
 #  define LargestIntegralType unsigned long long int
@@ -82,7 +81,7 @@ typedef uintmax_t LargestIntegralType;
 #endif /* LargestIntegralType */
 #endif /* DOXYGEN */
 
-/* Printf format used to display LargestIntegralType. */
+/* Printf format used to display LargestIntegralType as a hexidecimal. */
 #ifndef LargestIntegralTypePrintfFormat
 # ifdef _WIN32
 #  define LargestIntegralTypePrintfFormat "0x%I64x"
@@ -95,6 +94,23 @@ typedef uintmax_t LargestIntegralType;
 # endif /* _WIN32 */
 #endif /* LargestIntegralTypePrintfFormat */
 
+/* Printf format used to display LargestIntegralType as a decimal. */
+#ifndef LargestIntegralTypePrintfFormatDecimal
+# ifdef _WIN32
+#  define LargestIntegralTypePrintfFormatDecimal "%I64u"
+# else
+#  if __WORDSIZE == 64
+#   define LargestIntegralTypePrintfFormatDecimal "%lu"
+#  else
+#   define LargestIntegralTypePrintfFormatDecimal "%llu"
+#  endif
+# endif /* _WIN32 */
+#endif /* LargestIntegralTypePrintfFormat */
+
+#ifndef FloatPrintfFormat
+# define FloatPrintfFormat "%f"
+#endif /* FloatPrintfFormat */
+
 /* Perform an unsigned cast to LargestIntegralType. */
 #define cast_to_largest_integral_type(value) \
     ((LargestIntegralType)(value))
@@ -105,7 +121,7 @@ typedef uintmax_t LargestIntegralType;
     /* WIN32 is an ILP32 platform */
     typedef unsigned int uintptr_t;
 # elif defined(_WIN64)
-    typedef unsigned long int uintptr_t
+    typedef unsigned long int uintptr_t;
 # else /* _WIN32 */
 
 /* ILP32 and LP64 platforms */
@@ -152,6 +168,9 @@ cast_to_largest_integral_type(cast_to_pointer_integral_type(value))
 #define CMOCKA_DEPRECATED
 #endif
 
+#define WILL_RETURN_ALWAYS -1
+#define WILL_RETURN_ONCE -2
+
 /**
  * @defgroup cmocka_mock Mock Objects
  * @ingroup cmocka
@@ -194,8 +213,8 @@ cast_to_largest_integral_type(cast_to_pointer_integral_type(value))
  * }
  * @endcode
  *
- * For a complete example please at a look
- * <a href="http://git.cryptomilk.org/projects/cmocka.git/tree/example/chef_wrap/waiter_test_wrap.c">here</a>.
+ * For a complete example please take a look
+ * <a href="https://git.cryptomilk.org/projects/cmocka.git/tree/example/mock">here</a>.
  *
  * @{
  */
@@ -307,9 +326,11 @@ void will_return(#function, LargestIntegralType value);
  *
  * @param[in]  value The value to be returned by mock().
  *
- * @param[in]  count The parameter returns the number of times the value should
- *                   be returned by mock(). If count is set to -1 the value will
- *                   always be returned.
+ * @param[in]  count The parameter indicates the number of times the value should
+ *                   be returned by mock(). If count is set to -1, the value
+ *                   will always be returned but must be returned at least once.
+ *                   If count is set to -2, the value will always be returned
+ *                   by mock(), but is not required to be returned.
  *
  * @see mock()
  */
@@ -339,9 +360,36 @@ void will_return_count(#function, LargestIntegralType value, int count);
 void will_return_always(#function, LargestIntegralType value);
 #else
 #define will_return_always(function, value) \
-    will_return_count(function, (value), -1)
+    will_return_count(function, (value), WILL_RETURN_ALWAYS)
 #endif
 
+#ifdef DOXYGEN
+/**
+ * @brief Store a value that may be always returned by mock().
+ *
+ * This stores a value which will always be returned by mock() but is not
+ * required to be returned by at least one call to mock(). Therefore,
+ * in contrast to will_return_always() which causes a test failure if it
+ * is not returned at least once, will_return_maybe() will never cause a test
+ * to fail if its value is not returned.
+ *
+ * @param[in]  #function  The function which should return the given value.
+ *
+ * @param[in]  #value The value to be returned by mock().
+ *
+ * This is equivalent to:
+ * @code
+ * will_return_count(function, value, -2);
+ * @endcode
+ *
+ * @see will_return_count()
+ * @see mock()
+ */
+void will_return_maybe(#function, LargestIntegralType value);
+#else
+#define will_return_maybe(function, value) \
+    will_return_count(function, (value), WILL_RETURN_ONCE)
+#endif
 /** @} */
 
 /**
@@ -382,8 +430,8 @@ void will_return_always(#function, LargestIntegralType value);
  * }
  * @endcode
  *
- * For a complete example please at a look at
- * <a href="http://git.cryptomilk.org/projects/cmocka.git/tree/example/chef_wrap/waiter_test_wrap.c">here</a>
+ * For a complete example please take a look
+ * <a href="https://git.cryptomilk.org/projects/cmocka.git/tree/example/mock">here</a>
  *
  * @{
  */
@@ -923,6 +971,24 @@ void expect_any(#function, #parameter);
 
 #ifdef DOXYGEN
 /**
+ * @brief Add an event to always check if a parameter (of any value) has been passed.
+ *
+ * The event is triggered by calling check_expected() in the mocked function.
+ *
+ * @param[in]  #function  The function to add the check for.
+ *
+ * @param[in]  #parameter The name of the parameter passed to the function.
+ *
+ * @see check_expected().
+ */
+void expect_any_always(#function, #parameter);
+#else
+#define expect_any_always(function, parameter) \
+        expect_any_count(function, parameter, WILL_RETURN_ALWAYS)
+#endif
+
+#ifdef DOXYGEN
+/**
  * @brief Add an event to repeatedly check if a parameter (of any value) has
  *        been passed.
  *
@@ -1065,7 +1131,7 @@ void assert_return_code(int rc, int error);
  * @brief Assert that the given pointer is non-NULL.
  *
  * The function prints an error message to standard error and terminates the
- * test by calling fail() if the pointer is non-NULL.
+ * test by calling fail() if the pointer is NULL.
  *
  * @param[in]  pointer  The pointer to evaluate.
  *
@@ -1092,6 +1158,44 @@ void assert_null(void *pointer);
 #else
 #define assert_null(c) _assert_true(!(cast_ptr_to_largest_integral_type(c)), #c, \
 __FILE__, __LINE__)
+#endif
+
+#ifdef DOXYGEN
+/**
+ * @brief Assert that the two given pointers are equal.
+ *
+ * The function prints an error message and terminates the test by calling
+ * fail() if the pointers are not equal.
+ *
+ * @param[in]  a        The first pointer to compare.
+ *
+ * @param[in]  b        The pointer to compare against the first one.
+ */
+void assert_ptr_equal(void *a, void *b);
+#else
+#define assert_ptr_equal(a, b) \
+    _assert_int_equal(cast_ptr_to_largest_integral_type(a), \
+                      cast_ptr_to_largest_integral_type(b), \
+                      __FILE__, __LINE__)
+#endif
+
+#ifdef DOXYGEN
+/**
+ * @brief Assert that the two given pointers are not equal.
+ *
+ * The function prints an error message and terminates the test by calling
+ * fail() if the pointers are equal.
+ *
+ * @param[in]  a        The first pointer to compare.
+ *
+ * @param[in]  b        The pointer to compare against the first one.
+ */
+void assert_ptr_not_equal(void *a, void *b);
+#else
+#define assert_ptr_not_equal(a, b) \
+    _assert_int_not_equal(cast_ptr_to_largest_integral_type(a), \
+                          cast_ptr_to_largest_integral_type(b), \
+                          __FILE__, __LINE__)
 #endif
 
 #ifdef DOXYGEN
@@ -1133,6 +1237,51 @@ void assert_int_not_equal(int a, int b);
                           cast_to_largest_integral_type(b), \
                           __FILE__, __LINE__)
 #endif
+
+#ifdef DOXYGEN
+/**
+ * @brief Assert that the two given float are equal given an epsilon.
+ *
+ * The function prints an error message to standard error and terminates the
+ * test by calling fail() if the float are not equal (given an epsilon).
+ *
+ * @param[in]  a        The first float to compare.
+ *
+ * @param[in]  b        The float to compare against the first one.
+ *
+ * @param[in]  epsilon  The epsilon used as margin for float comparison.
+ */
+void assert_float_equal(float a, float b, float epsilon);
+#else
+#define assert_float_equal(a, b, epsilon) \
+	_assert_float_equal((float)a, \
+			(float)b, \
+			(float)epsilon, \
+			__FILE__, __LINE__)
+#endif
+
+#ifdef DOXYGEN
+/**
+ * @brief Assert that the two given float are not equal given an epsilon.
+ *
+ * The function prints an error message to standard error and terminates the
+ * test by calling fail() if the float are not equal (given an epsilon).
+ *
+ * @param[in]  a        The first float to compare.
+ *
+ * @param[in]  b        The float to compare against the first one.
+ *
+ * @param[in]  epsilon  The epsilon used as margin for float comparison.
+ */
+void assert_float_not_equal(float a, float b, float epsilon);
+#else
+#define assert_float_not_equal(a, b, epsilon) \
+	_assert_float_not_equal((float)a, \
+			(float)b, \
+			(float)epsilon, \
+			__FILE__, __LINE__)
+#endif
+
 
 #ifdef DOXYGEN
 /**
@@ -1301,6 +1450,138 @@ void assert_not_in_set(LargestIntegralType value, LargestIntegralType values[], 
 /** @} */
 
 /**
+ * @defgroup cmocka_call_order Call Ordering
+ * @ingroup cmocka
+ *
+ * It is often beneficial to  make sure that functions are called in an
+ * order. This is independent of mock returns and parameter checking as both
+ * of the aforementioned do not check the order in which they are called from
+ * different functions.
+ *
+ * <ul>
+ * <li><strong>expect_function_call(function)</strong> - The
+ * expect_function_call() macro pushes an expectation onto the stack of
+ * expected calls.</li>
+ *
+ * <li><strong>function_called()</strong> - pops a value from the stack of
+ * expected calls. function_called() is invoked within the mock object
+ * that uses it.
+ * </ul>
+ *
+ * expect_function_call() and function_called() are intended to be used in
+ * pairs. Cmocka will fail a test if there are more or less expected calls
+ * created (e.g. expect_function_call()) than consumed with function_called().
+ * There are provisions such as ignore_function_calls() which allow this
+ * restriction to be circumvented in tests where mock calls for the code under
+ * test are not the focus of the test.
+ *
+ * The following example illustrates how a unit test instructs cmocka
+ * to expect a function_called() from a particular mock,
+ * <strong>chef_sing()</strong>:
+ *
+ * @code
+ * void chef_sing(void);
+ *
+ * void code_under_test()
+ * {
+ *   chef_sing();
+ * }
+ *
+ * void some_test(void **state)
+ * {
+ *     expect_function_call(chef_sing);
+ *     code_under_test();
+ * }
+ * @endcode
+ *
+ * The implementation of the mock then must check whether it was meant to
+ * be called by invoking <strong>function_called()</strong>:
+ *
+ * @code
+ * void chef_sing()
+ * {
+ *     function_called();
+ * }
+ * @endcode
+ *
+ * @{
+ */
+
+#ifdef DOXYGEN
+/**
+ * @brief Check that current mocked function is being called in the expected
+ *        order
+ *
+ * @see expect_function_call()
+ */
+void function_called(void);
+#else
+#define function_called() _function_called(__func__, __FILE__, __LINE__)
+#endif
+
+#ifdef DOXYGEN
+/**
+ * @brief Store expected call(s) to a mock to be checked by function_called()
+ *        later.
+ *
+ * @param[in]  #function  The function which should should be called
+ *
+ * @param[in]  times number of times this mock must be called
+ *
+ * @see function_called()
+ */
+void expect_function_calls(#function, const int times);
+#else
+#define expect_function_calls(function, times) \
+    _expect_function_call(#function, __FILE__, __LINE__, times)
+#endif
+
+#ifdef DOXYGEN
+/**
+ * @brief Store expected single call to a mock to be checked by
+ *        function_called() later.
+ *
+ * @param[in]  #function  The function which should should be called
+ *
+ * @see function_called()
+ */
+void expect_function_call(#function);
+#else
+#define expect_function_call(function) \
+    _expect_function_call(#function, __FILE__, __LINE__, 1)
+#endif
+
+#ifdef DOXYGEN
+/**
+ * @brief Expects function_called() from given mock at least once
+ *
+ * @param[in]  #function  The function which should should be called
+ *
+ * @see function_called()
+ */
+void expect_function_call_any(#function);
+#else
+#define expect_function_call_any(function) \
+    _expect_function_call(#function, __FILE__, __LINE__, -1)
+#endif
+
+#ifdef DOXYGEN
+/**
+ * @brief Ignores function_called() invocations from given mock function.
+ *
+ * @param[in]  #function  The function which should should be called
+ *
+ * @see function_called()
+ */
+void ignore_function_calls(#function);
+#else
+#define ignore_function_calls(function) \
+    _expect_function_call(#function, __FILE__, __LINE__, -2)
+#endif
+
+/** @} */
+
+/**
  * @defgroup cmocka_exec Running Tests
  * @ingroup cmocka
  *
@@ -1454,22 +1735,40 @@ static inline void _unit_test_dummy(void **state) {
 
 
 /** Initializes a CMUnitTest structure. */
-#define cmocka_unit_test(f) { #f, f, NULL, NULL }
+#define cmocka_unit_test(f) { #f, f, NULL, NULL, NULL }
 
 /** Initializes a CMUnitTest structure with a setup function. */
-#define cmocka_unit_test_setup(f, setup) { #f, f, setup, NULL }
+#define cmocka_unit_test_setup(f, setup) { #f, f, setup, NULL, NULL }
 
 /** Initializes a CMUnitTest structure with a teardown function. */
-#define cmocka_unit_test_teardown(f, teardown) { #f, f, NULL, teardown }
+#define cmocka_unit_test_teardown(f, teardown) { #f, f, NULL, teardown, NULL }
 
 /**
  * Initialize an array of CMUnitTest structures with a setup function for a test
  * and a teardown function. Either setup or teardown can be NULL.
  */
-#define cmocka_unit_test_setup_teardown(f, setup, teardown) { #f, f, setup, teardown }
+#define cmocka_unit_test_setup_teardown(f, setup, teardown) { #f, f, setup, teardown, NULL }
 
-#define run_tests(tests) _run_tests(tests, sizeof(tests) / sizeof(tests)[0])
-#define run_group_tests(tests) _run_group_tests(tests, sizeof(tests) / sizeof(tests)[0])
+/**
+ * Initialize a CMUnitTest structure with given initial state. It will be passed
+ * to test function as an argument later. It can be used when test state does
+ * not need special initialization or was initialized already.
+ * @note If the group setup function initialized the state already, it won't be
+ * overridden by the initial state defined here.
+ */
+#define cmocka_unit_test_prestate(f, state) { #f, f, NULL, NULL, state }
+
+/**
+ * Initialize a CMUnitTest structure with given initial state, setup and
+ * teardown function. Any of these values can be NULL. Initial state is passed
+ * later to setup function, or directly to test if none was given.
+ * @note If the group setup function initialized the state already, it won't be
+ * overridden by the initial state defined here.
+ */
+#define cmocka_unit_test_prestate_setup_teardown(f, setup, teardown, state) { #f, f, setup, teardown, state }
+
+#define run_tests(tests) _run_tests(tests, sizeof(tests) / sizeof((tests)[0]))
+#define run_group_tests(tests) _run_group_tests(tests, sizeof(tests) / sizeof((tests)[0]))
 
 #ifdef DOXYGEN
 /**
@@ -1498,7 +1797,7 @@ static inline void _unit_test_dummy(void **state) {
  *      return 0;
  * }
  *
- * static void teardown(void **state) {
+ * static int teardown(void **state) {
  *      free(*state);
  *
  *      return 0;
@@ -1533,7 +1832,7 @@ int cmocka_run_group_tests(const struct CMUnitTest group_tests[],
                            CMFixtureFunction group_teardown);
 #else
 # define cmocka_run_group_tests(group_tests, group_setup, group_teardown) \
-        _cmocka_run_group_tests(#group_tests, group_tests, sizeof(group_tests) / sizeof(group_tests)[0], group_setup, group_teardown)
+        _cmocka_run_group_tests(#group_tests, group_tests, sizeof(group_tests) / sizeof((group_tests)[0]), group_setup, group_teardown)
 #endif
 
 #ifdef DOXYGEN
@@ -1566,7 +1865,7 @@ int cmocka_run_group_tests(const struct CMUnitTest group_tests[],
  *      return 0;
  * }
  *
- * static void teardown(void **state) {
+ * static int teardown(void **state) {
  *      free(*state);
  *
  *      return 0;
@@ -1602,7 +1901,7 @@ int cmocka_run_group_tests_name(const char *group_name,
                                 CMFixtureFunction group_teardown);
 #else
 # define cmocka_run_group_tests_name(group_name, group_tests, group_setup, group_teardown) \
-        _cmocka_run_group_tests(group_name, group_tests, sizeof(group_tests) / sizeof(group_tests)[0], group_setup, group_teardown)
+        _cmocka_run_group_tests(group_name, group_tests, sizeof(group_tests) / sizeof((group_tests)[0]), group_setup, group_teardown)
 #endif
 
 /** @} */
@@ -1859,6 +2158,7 @@ struct CMUnitTest {
     CMUnitTestFunction test_func;
     CMFixtureFunction setup_func;
     CMFixtureFunction teardown_func;
+    void *initial_state;
 };
 
 /* Location within some source code. */
@@ -1882,6 +2182,15 @@ extern const char * global_last_failed_assert;
 
 /* Retrieves a value for the given function, as set by "will_return". */
 LargestIntegralType _mock(const char * const function, const char* const file,
+                          const int line);
+
+void _expect_function_call(
+    const char * const function_name,
+    const char * const file,
+    const int line,
+    const int count);
+
+void _function_called(const char * const function, const char* const file,
                           const int line);
 
 void _expect_check(
@@ -1958,6 +2267,12 @@ void _assert_return_code(const LargestIntegralType result,
                          const char * const expression,
                          const char * const file,
                          const int line);
+void _assert_float_equal(const float a, const float n,
+		const float epsilon, const char* const file,
+		const int line);
+void _assert_float_not_equal(const float a, const float n,
+		const float epsilon, const char* const file,
+		const int line);
 void _assert_int_equal(
     const LargestIntegralType a, const LargestIntegralType b,
     const char * const file, const int line);
@@ -2038,6 +2353,31 @@ enum cm_message_output {
  *
  */
 void cmocka_set_message_output(enum cm_message_output output);
+
+
+/**
+ * @brief Set a pattern to only run the test matching the pattern.
+ *
+ * This allows to filter tests and only run the ones matching the pattern. The
+ * pattern can include two wildards. The first is '*', a wildcard that matches
+ * zero or more characters, or ‘?’, a wildcard that matches exactly one
+ * character.
+ *
+ * @param[in]  pattern    The pattern to match, e.g. "test_wurst*"
+ */
+void cmocka_set_test_filter(const char *pattern);
+
+/**
+ * @brief Set a pattern to skip tests matching the pattern.
+ *
+ * This allows to filter tests and skip the ones matching the pattern. The
+ * pattern can include two wildards. The first is '*', a wildcard that matches
+ * zero or more characters, or ‘?’, a wildcard that matches exactly one
+ * character.
+ *
+ * @param[in]  pattern    The pattern to match, e.g. "test_wurst*"
+ */
+void cmocka_set_skip_filter(const char *pattern);
 
 /** @} */
 

@@ -7,10 +7,10 @@ include(CheckCXXSourceCompiles)
 include(CheckStructHasMember)
 include(TestBigEndian)
 
-set(PACKAGE ${APPLICATION_NAME})
-set(VERSION ${APPLICATION_VERSION})
+set(PACKAGE ${PROJECT_NAME})
+set(VERSION ${PROJECT_VERSION})
 set(DATADIR ${DATA_INSTALL_DIR})
-set(LIBDIR ${LIB_INSTALL_DIR})
+set(LIBDIR ${CMAKE_INSTALL_LIBDIR})
 set(PLUGINDIR "${PLUGIN_INSTALL_DIR}-${LIBRARY_SOVERSION}")
 set(SYSCONFDIR ${SYSCONF_INSTALL_DIR})
 
@@ -76,6 +76,11 @@ check_function_exists(exit HAVE_EXIT)
 check_function_exists(fprintf HAVE_FPRINTF)
 check_function_exists(free HAVE_FREE)
 check_function_exists(longjmp HAVE_LONGJMP)
+
+# IMPORTANT(Ryan): These were changed from checking function to checking symbol
+check_symbol_exists(siglongjmp setjmp.h HAVE_SIGLONGJMP)
+check_symbol_exists(clock_gettime time.h HAVE_CLOCK_GETTIME)
+
 check_function_exists(malloc HAVE_MALLOC)
 check_function_exists(memcpy HAVE_MEMCPY)
 check_function_exists(memset HAVE_MEMSET)
@@ -83,24 +88,24 @@ check_function_exists(printf HAVE_PRINTF)
 check_function_exists(setjmp HAVE_SETJMP)
 check_function_exists(signal HAVE_SIGNAL)
 check_function_exists(strsignal HAVE_STRSIGNAL)
-check_function_exists(sprintf HAVE_SNPRINTF)
 check_function_exists(strcmp HAVE_STRCMP)
-check_function_exists(vsnprintf HAVE_VSNPRINTF)
-check_function_exists(clock_gettime HAVE_CLOCK_GETTIME)
 
 if (WIN32)
     check_function_exists(_vsnprintf_s HAVE__VSNPRINTF_S)
     check_function_exists(_vsnprintf HAVE__VSNPRINTF)
     check_function_exists(_snprintf HAVE__SNPRINTF)
     check_function_exists(_snprintf_s HAVE__SNPRINTF_S)
+    check_symbol_exists(snprintf stdio.h HAVE_SNPRINTF)
+    check_symbol_exists(vsnprintf stdio.h HAVE_VSNPRINTF)
+else (WIN32)
+    check_function_exists(sprintf HAVE_SNPRINTF)
+    check_function_exists(vsnprintf HAVE_VSNPRINTF)
 endif (WIN32)
 
 find_library(RT_LIBRARY rt)
-if (RT_LIBRARY)
-    set(CMAKE_REQUIRED_LIBRARIES ${RT_LIBRARY})
-endif (RT_LIBRARY)
-
-set(CMOCKA_REQUIRED_LIBRARIES ${CMAKE_REQUIRED_LIBRARIES} CACHE INTERNAL "cmocka required system libraries")
+if (RT_LIBRARY AND NOT LINUX AND NOT ANDROID)
+    set(CMOCKA_REQUIRED_LIBRARIES ${RT_LIBRARY} CACHE INTERNAL "cmocka required system libraries")
+endif ()
 
 # OPTIONS
 check_c_source_compiles("
@@ -120,9 +125,10 @@ int main(void) {
 endif(WIN32)
 
 if (HAVE_TIME_H AND HAVE_STRUCT_TIMESPEC AND HAVE_CLOCK_GETTIME)
-    set(CMAKE_REQUIRED_LIBRARIES ${RT_LIBRARY})
+    if (RT_LIBRARY)
+        set(CMAKE_REQUIRED_LIBRARIES ${RT_LIBRARY})
+    endif()
 
-    message(STATUS "CMAKE_REQUIRED_INCLUDES=${CMAKE_REQUIRED_INCLUDES} CMAKE_REQUIRED_LIBRARIES=${CMAKE_REQUIRED_LIBRARIES}")
     check_c_source_compiles("
 #include <time.h>
 
@@ -132,8 +138,11 @@ int main(void) {
     clock_gettime(CLOCK_REALTIME, &ts);
 
     return 0;
-}" HAVE_CLOCK_GETTIME_REALTIME)
+}" HAVE_CLOCK_REALTIME)
+
+    # reset cmake requirements
     set(CMAKE_REQUIRED_INCLUDES)
+    set(CMAKE_REQUIRED_LIBRARIES)
 endif ()
 
 # ENDIAN

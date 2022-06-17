@@ -1,6 +1,6 @@
 /*
  * Copyright 2008 Google Inc.
- * Copyright 2014-2015 Andreas Schneider <asn@cryptomilk.org>
+ * Copyright 2014-2018 Andreas Schneider <asn@cryptomilk.org>
  * Copyright 2015      Jakub Hrozek <jakub.hrozek@posteo.se>
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -31,6 +31,10 @@
 #include <signal.h>
 #endif
 
+#ifdef HAVE_STRINGS_H
+#include <strings.h>
+#endif
+
 #include <stdint.h>
 #include <setjmp.h>
 #include <stdarg.h>
@@ -39,6 +43,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <float.h>
 
 /*
  * This allows to add a platform specific header file. Some embedded platforms
@@ -78,11 +83,29 @@
 # define CMOCKA_THREAD
 #endif
 
-#ifdef HAVE_CLOCK_GETTIME_REALTIME
+#ifdef HAVE_CLOCK_REALTIME
 #define CMOCKA_CLOCK_GETTIME(clock_id, ts) clock_gettime((clock_id), (ts))
 #else
 #define CMOCKA_CLOCK_GETTIME(clock_id, ts)
 #endif
+
+#ifndef MAX
+#define MAX(a,b) ((a) < (b) ? (b) : (a))
+#endif
+
+/**
+ * POSIX has sigsetjmp/siglongjmp, while Windows only has setjmp/longjmp.
+ */
+#ifdef HAVE_SIGLONGJMP
+# define cm_jmp_buf             sigjmp_buf
+# define cm_setjmp(env)         sigsetjmp(env, 1)
+# define cm_longjmp(env, val)   siglongjmp(env, val)
+#else
+# define cm_jmp_buf             jmp_buf
+# define cm_setjmp(env)         setjmp(env)
+# define cm_longjmp(env, val)   longjmp(env, val)
+#endif
+
 
 /*
  * Declare and initialize the pointer member of ValuePointer variable name
@@ -126,12 +149,17 @@ typedef struct ListNode {
 } ListNode;
 
 /* Debug information for malloc(). */
-typedef struct MallocBlockInfo {
+struct MallocBlockInfoData {
     void* block;              /* Address of the block returned by malloc(). */
     size_t allocated_size;    /* Total size of the allocated block. */
     size_t size;              /* Request block size. */
     SourceLocation location;  /* Where the block was allocated. */
     ListNode node;            /* Node within list of all allocated blocks. */
+};
+
+typedef union {
+    struct MallocBlockInfoData *data;
+    char *ptr;
 } MallocBlockInfo;
 
 /* State of each test. */
@@ -159,6 +187,12 @@ typedef struct SymbolMapValue {
     const char *symbol_name;
     ListNode symbol_values_list_head;
 } SymbolMapValue;
+
+/* Where a particular ordering was located and its symbol name */
+typedef struct FuncOrderingValue {
+    SourceLocation location;
+    const char * function;
+} FuncOrderingValue;
 
 /* Used by list_free() to deallocate values referenced by list nodes. */
 typedef void (*CleanupListValue)(const void *value, void *cleanup_value_data);
@@ -215,9 +249,16 @@ static void free_symbol_map_value(
     const void *value, void *cleanup_value_data);
 static void remove_always_return_values(ListNode * const map_head,
                                         const size_t number_of_symbol_names);
-static int check_for_leftover_values(
+
+static size_t check_for_leftover_values_list(const ListNode * head,
+                                             const char * const error_message);
+
+static size_t check_for_leftover_values(
     const ListNode * const map_head, const char * const error_message,
     const size_t number_of_symbol_names);
+
+static void remove_always_return_values_from_list(ListNode * const map_head);
+
 /*
  * This must be called at the beginning of a test to initialize some data
  * structures.
@@ -226,6 +267,8 @@ static void initialize_testing(const char *test_name);
 
 /* This must be called at the end of a test to free() allocated structures. */
 static void teardown_testing(const char *test_name);
+
+static enum cm_message_output cm_get_output(void);
 
 static int cm_error_message_enabled = 1;
 static CMOCKA_THREAD char *cm_error_message;
@@ -236,7 +279,7 @@ void cm_print_error(const char * const format, ...) CMOCKA_PRINTF_ATTRIBUTE(1, 2
  * Keeps track of the calling context returned by setenv() so that the fail()
  * method can jump out of a test.
  */
-static CMOCKA_THREAD jmp_buf global_run_test_env;
+static CMOCKA_THREAD cm_jmp_buf global_run_test_env;
 static CMOCKA_THREAD int global_running_test = 0;
 
 /* Keeps track of the calling context returned by setenv() so that */
@@ -258,10 +301,19 @@ static CMOCKA_THREAD ListNode global_function_parameter_map_head;
 /* Location of last parameter value checked was declared. */
 static CMOCKA_THREAD SourceLocation global_last_parameter_location;
 
+/* List (acting as FIFO) of call ordering. */
+static CMOCKA_THREAD ListNode global_call_ordering_head;
+/* Location of last call ordering that was declared. */
+static CMOCKA_THREAD SourceLocation global_last_call_ordering_location;
+
 /* List of all currently allocated blocks. */
 static CMOCKA_THREAD ListNode global_allocated_blocks;
 
 static enum cm_message_output global_msg_output = CM_OUTPUT_STDOUT;
+
+static const char *global_test_filter_pattern;
+
+static const char *global_skip_filter_pattern;
 
 #ifndef _WIN32
 /* Signals caught by exception_handler(). */
@@ -339,13 +391,19 @@ struct CMUnitTestState {
 /* Exit the currently executing test. */
 static void exit_test(const int quit_application)
 {
-    const char *abort_test = getenv("CMOCKA_TEST_ABORT");
+    const char *env = getenv("CMOCKA_TEST_ABORT");
+    int abort_test = 0;
 
-    if (abort_test != NULL && abort_test[0] == '1') {
+    if (env != NULL && strlen(env) == 1) {
+        abort_test = (env[0] == '1');
+    }
+
+    if (global_skip_test == 0 &&
+        abort_test == 1) {
         print_error("%s", cm_error_message);
         abort();
     } else if (global_running_test) {
-        longjmp(global_run_test_env, 1);
+        cm_longjmp(global_run_test_env, 1);
     } else if (quit_application) {
         exit(-1);
     }
@@ -383,19 +441,118 @@ static void set_source_location(
 }
 
 
+static int c_strreplace(char *src,
+                        size_t src_len,
+                        const char *pattern,
+                        const char *repl,
+                        int *str_replaced)
+{
+    char *p = NULL;
+
+    p = strstr(src, pattern);
+    if (p == NULL) {
+        return -1;
+    }
+
+    do {
+        size_t of = p - src;
+        size_t l  = strlen(src);
+        size_t pl = strlen(pattern);
+        size_t rl = strlen(repl);
+
+        /* overflow check */
+        if (src_len <= l + MAX(pl, rl) + 1) {
+            return -1;
+        }
+
+        if (rl != pl) {
+            memmove(src + of + rl, src + of + pl, l - of - pl + 1);
+        }
+
+        memcpy(src + of, repl, rl);
+
+        if (str_replaced != NULL) {
+            *str_replaced = 1;
+        }
+        p = strstr(src, pattern);
+    } while (p != NULL);
+
+    return 0;
+}
+
+static int c_strmatch(const char *str, const char *pattern)
+{
+    int ok;
+
+    if (str == NULL || pattern == NULL) {
+        return 0;
+    }
+
+    for (;;) {
+        /* Check if pattern is done */
+        if (*pattern == '\0') {
+            /* If string is at the end, we're good */
+            if (*str == '\0') {
+                return 1;
+            }
+
+            return 0;
+        }
+
+        if (*pattern == '*') {
+            /* Move on */
+            pattern++;
+
+            /* If we are at the end, everything is fine */
+            if (*pattern == '\0') {
+                return 1;
+            }
+
+            /* Try to match each position */
+            for (; *str != '\0'; str++) {
+                ok = c_strmatch(str, pattern);
+                if (ok) {
+                    return 1;
+                }
+            }
+
+            /* No match */
+            return 0;
+        }
+
+        /* If we are at the end, leave */
+        if (*str == '\0') {
+            return 0;
+        }
+
+        /* Check if we have a single wildcard or matching char */
+        if (*pattern != '?' && *str != *pattern) {
+            return 0;
+        }
+
+        /* Move string and pattern */
+        str++;
+        pattern++;
+    }
+
+    return 0;
+}
+
 /* Create function results and expected parameter lists. */
 void initialize_testing(const char *test_name) {
-	(void)test_name;
+    (void)test_name;
     list_initialize(&global_function_result_map_head);
     initialize_source_location(&global_last_mock_value_location);
     list_initialize(&global_function_parameter_map_head);
+    initialize_source_location(&global_last_parameter_location);
+    list_initialize(&global_call_ordering_head);
     initialize_source_location(&global_last_parameter_location);
 }
 
 
 static void fail_if_leftover_values(const char *test_name) {
     int error_occurred = 0;
-	(void)test_name;
+    (void)test_name;
     remove_always_return_values(&global_function_result_map_head, 1);
     if (check_for_leftover_values(
             &global_function_result_map_head,
@@ -406,7 +563,14 @@ static void fail_if_leftover_values(const char *test_name) {
     remove_always_return_values(&global_function_parameter_map_head, 2);
     if (check_for_leftover_values(
             &global_function_parameter_map_head,
-            "%s parameter still has values that haven't been checked.\n", 2)) {
+            "'%s' parameter still has values that haven't been checked.\n",
+            2)) {
+        error_occurred = 1;
+    }
+
+    remove_always_return_values_from_list(&global_call_ordering_head);
+    if (check_for_leftover_values_list(&global_call_ordering_head,
+        "%s function was expected to be called but was not.\n")) {
         error_occurred = 1;
     }
     if (error_occurred) {
@@ -416,13 +580,16 @@ static void fail_if_leftover_values(const char *test_name) {
 
 
 static void teardown_testing(const char *test_name) {
-	(void)test_name;
+    (void)test_name;
     list_free(&global_function_result_map_head, free_symbol_map_value,
               (void*)0);
     initialize_source_location(&global_last_mock_value_location);
     list_free(&global_function_parameter_map_head, free_symbol_map_value,
               (void*)1);
     initialize_source_location(&global_last_parameter_location);
+    list_free(&global_call_ordering_head, free_value,
+              (void*)0);
+    initialize_source_location(&global_last_call_ordering_location);
 }
 
 /* Initialize a list node. */
@@ -528,7 +695,7 @@ static int list_find(ListNode * const head, const void *value,
 
 /* Returns the first node of a list */
 static int list_first(ListNode * const head, ListNode **output) {
-    ListNode *target_node;
+    ListNode *target_node = NULL;
     assert_non_null(head);
     if (list_empty(head)) {
         return 0;
@@ -541,7 +708,7 @@ static int list_first(ListNode * const head, ListNode **output) {
 
 /* Deallocate a value referenced by a list. */
 static void free_value(const void *value, void *cleanup_value_data) {
-	(void)cleanup_value_data;
+    (void)cleanup_value_data;
     assert_non_null(value);
     free((void*)value);
 }
@@ -568,7 +735,6 @@ static int symbol_names_match(const void *map_value, const void *symbol) {
     return !strcmp(((SymbolMapValue*)map_value)->symbol_name,
                    (const char*)symbol);
 }
-
 
 /*
  * Adds a value to the queue of values associated with the given hierarchy of
@@ -617,8 +783,8 @@ static void add_symbol_value(ListNode * const symbol_map_head,
 static int get_symbol_value(
         ListNode * const head, const char * const symbol_names[],
         const size_t number_of_symbol_names, void **output) {
-    const char* symbol_name;
-    ListNode *target_node;
+    const char* symbol_name = NULL;
+    ListNode *target_node = NULL;
     assert_non_null(head);
     assert_non_null(symbol_names);
     assert_true(number_of_symbol_names);
@@ -626,8 +792,8 @@ static int get_symbol_value(
     symbol_name = symbol_names[0];
 
     if (list_find(head, symbol_name, symbol_names_match, &target_node)) {
-        SymbolMapValue *map_value;
-        ListNode *child_list;
+        SymbolMapValue *map_value = NULL;
+        ListNode *child_list = NULL;
         int return_value = 0;
         assert_non_null(target_node);
         assert_non_null(target_node->value);
@@ -639,10 +805,16 @@ static int get_symbol_value(
             ListNode *value_node = NULL;
             return_value = list_first(child_list, &value_node);
             assert_true(return_value);
+            /* Add a check to silence clang analyzer */
+            if (return_value == 0) {
+                goto out;
+            }
             *output = (void*) value_node->value;
             return_value = value_node->refcount;
-            if (--value_node->refcount == 0) {
+            if (value_node->refcount - 1 == 0) {
                 list_remove_free(value_node, NULL, NULL);
+            } else if (value_node->refcount > WILL_RETURN_ONCE) {
+                --value_node->refcount;
             }
         } else {
             return_value = get_symbol_value(
@@ -653,12 +825,32 @@ static int get_symbol_value(
             list_remove_free(target_node, free_symbol_map_value, (void*)0);
         }
         return return_value;
-    } else {
-        cm_print_error("No entries for symbol %s.\n", symbol_name);
     }
+out:
+    cm_print_error("No entries for symbol %s.\n", symbol_name);
     return 0;
 }
 
+/**
+ * Taverse a list of nodes and remove first symbol value in list that has a
+ * refcount < -1 (i.e. should always be returned and has been returned at
+ * least once).
+ */
+
+static void remove_always_return_values_from_list(ListNode * const map_head)
+{
+    ListNode * current = NULL;
+    ListNode * next = NULL;
+    assert_non_null(map_head);
+
+    for (current = map_head->next, next = current->next;
+            current != map_head;
+            current = next, next = current->next) {
+        if (current->refcount < -1) {
+            list_remove_free(current, free_value, NULL);
+        }
+    }
+}
 
 /*
  * Traverse down a tree of symbol values and remove the first symbol value
@@ -698,15 +890,35 @@ static void remove_always_return_values(ListNode * const map_head,
     }
 }
 
+static size_t check_for_leftover_values_list(const ListNode * head,
+                                             const char * const error_message)
+{
+    ListNode *child_node;
+    size_t leftover_count = 0;
+    if (!list_empty(head))
+    {
+        for (child_node = head->next; child_node != head;
+                 child_node = child_node->next, ++leftover_count) {
+            const FuncOrderingValue *const o =
+                    (const FuncOrderingValue*) child_node->value;
+            cm_print_error(error_message, "%s", o->function);
+            cm_print_error(SOURCE_LOCATION_FORMAT
+                    ": note: remaining item was declared here\n",
+                    o->location.file, o->location.line);
+        }
+    }
+    return leftover_count;
+}
+
 /*
  * Checks if there are any leftover values set up by the test that were never
  * retrieved through execution, and fail the test if that is the case.
  */
-static int check_for_leftover_values(
+static size_t check_for_leftover_values(
         const ListNode * const map_head, const char * const error_message,
         const size_t number_of_symbol_names) {
     const ListNode *current;
-    int symbols_with_leftover_values = 0;
+    size_t symbols_with_leftover_values = 0;
     assert_non_null(map_head);
     assert_true(number_of_symbol_names);
 
@@ -721,7 +933,7 @@ static int check_for_leftover_values(
         if (!list_empty(child_list)) {
             if (number_of_symbol_names == 1) {
                 const ListNode *child_node;
-                cm_print_error(error_message, value->symbol_name);
+                cm_print_error(error_message, "%s", value->symbol_name);
 
                 for (child_node = child_list->next; child_node != child_list;
                      child_node = child_node->next) {
@@ -732,7 +944,7 @@ static int check_for_leftover_values(
                                    location->file, location->line);
                 }
             } else {
-                cm_print_error("%s.", value->symbol_name);
+                cm_print_error("%s: ", value->symbol_name);
                 check_for_leftover_values(child_list, error_message,
                                           number_of_symbol_names - 1);
             }
@@ -774,14 +986,89 @@ LargestIntegralType _mock(const char * const function, const char* const file,
     return 0;
 }
 
+/* Ensure that function is being called in proper order */
+void _function_called(const char *const function,
+                      const char *const file,
+                      const int line)
+{
+    ListNode *first_value_node = NULL;
+    ListNode *value_node = NULL;
+    int rc;
+
+    rc = list_first(&global_call_ordering_head, &value_node);
+    first_value_node = value_node;
+    if (rc) {
+        FuncOrderingValue *expected_call;
+        int cmp;
+
+        expected_call = (FuncOrderingValue *)value_node->value;
+
+        cmp = strcmp(expected_call->function, function);
+        if (value_node->refcount < -1) {
+            /*
+             * Search through value nodes until either function is found or
+             * encounter a non-zero refcount greater than -2
+             */
+            if (cmp != 0) {
+                value_node = value_node->next;
+                expected_call = (FuncOrderingValue *)value_node->value;
+
+                cmp = strcmp(expected_call->function, function);
+                while (value_node->refcount < -1 &&
+                       cmp != 0 &&
+                       value_node != first_value_node->prev) {
+                    value_node = value_node->next;
+                    if (value_node == NULL) {
+                        break;
+                    }
+                    expected_call = (FuncOrderingValue *)value_node->value;
+                    if (expected_call == NULL) {
+                        continue;
+                    }
+                    cmp = strcmp(expected_call->function, function);
+                }
+
+                if (expected_call == NULL || value_node == first_value_node->prev) {
+                    cm_print_error(SOURCE_LOCATION_FORMAT
+                                   ": error: No expected mock calls matching "
+                                   "called() invocation in %s",
+                                   file, line,
+                                   function);
+                    exit_test(1);
+                }
+            }
+        }
+
+        if (cmp == 0) {
+            if (value_node->refcount > -2 && --value_node->refcount == 0) {
+                list_remove_free(value_node, free_value, NULL);
+            }
+        } else {
+            cm_print_error(SOURCE_LOCATION_FORMAT
+                           ": error: Expected call to %s but received called() "
+                           "in %s\n",
+                           file, line,
+                           expected_call->function,
+                           function);
+            exit_test(1);
+        }
+    } else {
+        cm_print_error(SOURCE_LOCATION_FORMAT
+                       ": error: No mock calls expected but called() was "
+                       "invoked in %s\n",
+                       file, line,
+                       function);
+        exit_test(1);
+    }
+}
 
 /* Add a return value for the specified mock function name. */
 void _will_return(const char * const function_name, const char * const file,
                   const int line, const LargestIntegralType value,
                   const int count) {
     SymbolValue * const return_value =
-	    (SymbolValue*)malloc(sizeof(*return_value));
-    assert_true(count > 0 || count == -1);
+        (SymbolValue*)malloc(sizeof(*return_value));
+    assert_true(count != 0);
     return_value->value = value;
     set_source_location(&return_value->location, file, line);
     add_symbol_value(&global_function_result_map_head, &function_name, 1,
@@ -812,6 +1099,87 @@ void _expect_check(
                      count);
 }
 
+/*
+ * Add an call expectations that a particular function is called correctly.
+ * This is used for code under test that makes calls to several functions
+ * in depended upon components (mocks).
+ */
+
+void _expect_function_call(
+    const char * const function_name,
+    const char * const file,
+    const int line,
+    const int count)
+{
+    FuncOrderingValue *ordering;
+
+    assert_non_null(function_name);
+    assert_non_null(file);
+    assert_true(count != 0);
+
+    ordering = (FuncOrderingValue *)malloc(sizeof(*ordering));
+
+    set_source_location(&ordering->location, file, line);
+    ordering->function = function_name;
+
+    list_add_value(&global_call_ordering_head, ordering, count);
+}
+
+/* Returns 1 if the specified float values are equal, else returns 0. */
+static int float_compare(const float left,
+                         const float right,
+                         const float epsilon) {
+    float absLeft;
+    float absRight;
+    float largest;
+    float relDiff;
+
+    float diff = left - right;
+    diff = (diff >= 0.f) ? diff : -diff;
+
+    // Check if the numbers are really close -- needed
+        // when comparing numbers near zero.
+        if (diff <= epsilon) {
+            return 1;
+    }
+
+    absLeft = (left >= 0.f) ? left : -left;
+    absRight = (right >= 0.f) ? right : -right;
+
+        largest = (absRight > absLeft) ? absRight : absLeft;
+    relDiff = largest * FLT_EPSILON;
+
+        if (diff > relDiff) {
+        return 0;
+    }
+    return 1;
+}
+
+/* Returns 1 if the specified float values are equal. If the values are not equal
+ * an error is displayed and 0 is returned. */
+static int float_values_equal_display_error(const float left,
+                                            const float right,
+                                            const float epsilon) {
+    const int equal = float_compare(left, right, epsilon);
+    if (!equal) {
+        cm_print_error(FloatPrintfFormat " != "
+                   FloatPrintfFormat "\n", left, right);
+    }
+    return equal;
+}
+
+/* Returns 1 if the specified float values are different. If the values are equal
+ * an error is displayed and 0 is returned. */
+static int float_values_not_equal_display_error(const float left,
+                                                const float right,
+                                                const float epsilon) {
+    const int not_equal = (float_compare(left, right, epsilon) == 0);
+    if (!not_equal) {
+        cm_print_error(FloatPrintfFormat " == "
+                   FloatPrintfFormat "\n", left, right);
+    }
+    return not_equal;
+}
 
 /* Returns 1 if the specified values are equal.  If the values are not equal
  * an error is displayed and 0 is returned. */
@@ -866,10 +1234,11 @@ static int value_in_set_display_error(
         if (succeeded) {
             return 1;
         }
-        cm_print_error("%" PRIu64 " is %sin the set (", value,
-                       invert ? "" : "not ");
+        cm_print_error(LargestIntegralTypePrintfFormatDecimal
+                       " is %sin the set (",
+                       value, invert ? "" : "not ");
         for (i = 0; i < size_of_set; i++) {
-            cm_print_error("%" PRIu64 ", ", set[i]);
+            cm_print_error(LargestIntegralTypePrintfFormat ", ", set[i]);
         }
         cm_print_error(")\n");
     }
@@ -888,7 +1257,10 @@ static int integer_in_range_display_error(
     if (value >= range_min && value <= range_max) {
         return 1;
     }
-    cm_print_error("%" PRIu64 " is not within the range %" PRIu64 "-%" PRIu64 "\n",
+    cm_print_error(LargestIntegralTypePrintfFormatDecimal
+                   " is not within the range "
+                   LargestIntegralTypePrintfFormatDecimal "-"
+                   LargestIntegralTypePrintfFormatDecimal "\n",
                    value, range_min, range_max);
     return 0;
 }
@@ -905,7 +1277,10 @@ static int integer_not_in_range_display_error(
     if (value < range_min || value > range_max) {
         return 1;
     }
-    cm_print_error("%" PRIu64 " is within the range %" PRIu64 "-%" PRIu64 "\n",
+    cm_print_error(LargestIntegralTypePrintfFormatDecimal
+                   " is within the range "
+                   LargestIntegralTypePrintfFormatDecimal "-"
+                   LargestIntegralTypePrintfFormatDecimal "\n",
                    value, range_min, range_max);
     return 0;
 }
@@ -947,20 +1322,25 @@ static int string_not_equal_display_error(
  */
 static int memory_equal_display_error(const char* const a, const char* const b,
                                       const size_t size) {
-    int differences = 0;
+    size_t differences = 0;
     size_t i;
     for (i = 0; i < size; i++) {
         const char l = a[i];
         const char r = b[i];
         if (l != r) {
-            cm_print_error("difference at offset %" PRIdS " 0x%02x 0x%02x\n",
-                           i, l, r);
+            if (differences < 16) {
+                cm_print_error("difference at offset %" PRIdS " 0x%02x 0x%02x\n",
+                               i, l, r);
+            }
             differences ++;
         }
     }
-    if (differences) {
-        cm_print_error("%d bytes of %p and %p differ\n", differences,
-                    a, b);
+    if (differences > 0) {
+        if (differences >= 16) {
+            cm_print_error("...\n");
+        }
+        cm_print_error("%"PRIdS " bytes of %p and %p differ\n",
+                       differences, (void *)a, (void *)b);
         return 0;
     }
     return 1;
@@ -984,8 +1364,8 @@ static int memory_not_equal_display_error(
         }
     }
     if (same == size) {
-        cm_print_error("%"PRIdS "bytes of %p and %p the same\n", same,
-                    a, b);
+        cm_print_error("%"PRIdS "bytes of %p and %p the same\n",
+                       same, (void *)a, (void *)b);
         return 0;
     }
     return 1;
@@ -1218,7 +1598,7 @@ static void expect_memory_setup(
         const void * const memory, const size_t size,
         const CheckParameterValue check_function, const int count) {
     CheckMemoryData * const check_data =
-	    (CheckMemoryData*)malloc(sizeof(*check_data) + size);
+        (CheckMemoryData*)malloc(sizeof(*check_data) + size);
     void * const mem = (void*)(check_data + 1);
     declare_initialize_value_pointer_pointer(check_data_pointer, check_data);
     assert_non_null(memory);
@@ -1250,7 +1630,7 @@ static int check_not_memory(const LargestIntegralType value,
     assert_non_null(check);
     return memory_not_equal_display_error(
         cast_largest_integral_type_to_pointer(const char*, value),
-	(const char*)check->memory,
+        (const char*)check->memory,
         check->size);
 }
 
@@ -1268,8 +1648,8 @@ void _expect_not_memory(
 /* CheckParameterValue callback that always returns 1. */
 static int check_any(const LargestIntegralType value,
                      const LargestIntegralType check_value_data) {
-	(void)value;
-	(void)check_value_data;
+    (void)value;
+    (void)check_value_data;
     return 1;
 }
 
@@ -1286,7 +1666,7 @@ void _expect_any(
 void _check_expected(
         const char * const function_name, const char * const parameter_name,
         const char* file, const int line, const LargestIntegralType value) {
-    void *result;
+    void *result = NULL;
     const char* symbols[] = {function_name, parameter_name};
     const int rc = get_symbol_value(&global_function_parameter_map_head,
                                     symbols, 2, &result);
@@ -1383,11 +1763,32 @@ void _assert_return_code(const LargestIntegralType result,
 
     if (result > valmax - 1) {
         if (error > 0) {
-            cm_print_error("%s < 0, errno(%" PRIu64 "): %s\n",
+            cm_print_error("%s < 0, errno("
+                           LargestIntegralTypePrintfFormatDecimal "): %s\n",
                            expression, error, strerror((int)error));
         } else {
             cm_print_error("%s < 0\n", expression);
         }
+        _fail(file, line);
+    }
+}
+
+void _assert_float_equal(const float a,
+                         const float b,
+                         const float epsilon,
+                         const char * const file,
+                         const int line) {
+    if (!float_values_equal_display_error(a, b, epsilon)) {
+        _fail(file, line);
+    }
+}
+
+void _assert_float_not_equal(const float a,
+                             const float b,
+                             const float epsilon,
+                             const char * const file,
+                             const int line) {
+    if (!float_values_not_equal_display_error(a, b, epsilon)) {
         _fail(file, line);
     }
 }
@@ -1489,7 +1890,7 @@ void _assert_not_in_set(const LargestIntegralType value,
 
 
 /* Get the list of allocated blocks. */
-static ListNode* get_allocated_blocks_list() {
+static ListNode* get_allocated_blocks_list(void) {
     /* If it initialized, initialize the list of allocated blocks. */
     if (!global_allocated_blocks.value) {
         list_initialize(&global_allocated_blocks);
@@ -1498,11 +1899,11 @@ static ListNode* get_allocated_blocks_list() {
     return &global_allocated_blocks;
 }
 
-static void *libc_malloc(size_t size)
+static void *libc_calloc(size_t nmemb, size_t size)
 {
-#undef malloc
-    return malloc(size);
-#define malloc test_malloc
+#undef calloc
+    return calloc(nmemb, size);
+#define calloc test_calloc
 }
 
 static void libc_free(void *ptr)
@@ -1531,20 +1932,21 @@ static void vcm_print_error(const char* const format, va_list args)
     size_t msg_len = 0;
     va_list ap;
     int len;
+    va_copy(ap, args);
 
     len = vsnprintf(buffer, sizeof(buffer), format, args);
     if (len < 0) {
         /* TODO */
-        return;
+        goto end;
     }
 
     if (cm_error_message == NULL) {
         /* CREATE MESSAGE */
 
-        cm_error_message = libc_malloc(len + 1);
+        cm_error_message = libc_calloc(1, len + 1);
         if (cm_error_message == NULL) {
             /* TODO */
-            return;
+            goto end;
         }
     } else {
         /* APPEND MESSAGE */
@@ -1553,7 +1955,7 @@ static void vcm_print_error(const char* const format, va_list args)
         msg_len = strlen(cm_error_message);
         tmp = libc_realloc(cm_error_message, msg_len + len + 1);
         if (tmp == NULL) {
-            return;
+            goto end;
         }
         cm_error_message = tmp;
     }
@@ -1562,10 +1964,11 @@ static void vcm_print_error(const char* const format, va_list args)
         /* Use len + 1 to also copy '\0' */
         memcpy(cm_error_message + msg_len, buffer, len + 1);
     } else {
-        va_copy(ap, args);
         vsnprintf(cm_error_message + msg_len, len, format, ap);
-        va_end(ap);
     }
+end:
+    va_end(ap);
+
 }
 
 static void vcm_free_error(char *err_msg)
@@ -1576,16 +1979,22 @@ static void vcm_free_error(char *err_msg)
 /* Use the real malloc in this function. */
 #undef malloc
 void* _test_malloc(const size_t size, const char* file, const int line) {
-    char* ptr;
-    MallocBlockInfo *block_info;
+    char *ptr = NULL;
+    MallocBlockInfo block_info;
     ListNode * const block_list = get_allocated_blocks_list();
-    const size_t allocate_size = size + (MALLOC_GUARD_SIZE * 2) +
-        sizeof(*block_info) + MALLOC_ALIGNMENT;
-    char* const block = (char*)malloc(allocate_size);
+    size_t allocate_size;
+    char *block = NULL;
+
+    allocate_size = size + (MALLOC_GUARD_SIZE * 2) +
+                    sizeof(struct MallocBlockInfoData) + MALLOC_ALIGNMENT;
+    assert_true(allocate_size > size);
+
+    block = (char *)malloc(allocate_size);
     assert_non_null(block);
 
     /* Calculate the returned address. */
-    ptr = (char*)(((size_t)block + MALLOC_GUARD_SIZE + sizeof(*block_info) +
+    ptr = (char*)(((size_t)block + MALLOC_GUARD_SIZE +
+                  sizeof(struct MallocBlockInfoData) +
                   MALLOC_ALIGNMENT) & ~(MALLOC_ALIGNMENT - 1));
 
     /* Initialize the guard blocks. */
@@ -1593,14 +2002,14 @@ void* _test_malloc(const size_t size, const char* file, const int line) {
     memset(ptr + size, MALLOC_GUARD_PATTERN, MALLOC_GUARD_SIZE);
     memset(ptr, MALLOC_ALLOC_PATTERN, size);
 
-    block_info = (MallocBlockInfo*)(ptr - (MALLOC_GUARD_SIZE +
-                                             sizeof(*block_info)));
-    set_source_location(&block_info->location, file, line);
-    block_info->allocated_size = allocate_size;
-    block_info->size = size;
-    block_info->block = block;
-    block_info->node.value = block_info;
-    list_add(block_list, &block_info->node);
+    block_info.ptr = ptr - (MALLOC_GUARD_SIZE +
+                            sizeof(struct MallocBlockInfoData));
+    set_source_location(&block_info.data->location, file, line);
+    block_info.data->allocated_size = allocate_size;
+    block_info.data->size = size;
+    block_info.data->block = block;
+    block_info.data->node.value = block_info.ptr;
+    list_add(block_list, &block_info.data->node);
     return ptr;
 }
 #define malloc test_malloc
@@ -1614,6 +2023,7 @@ void* _test_calloc(const size_t number_of_elements, const size_t size,
     }
     return ptr;
 }
+#define calloc test_calloc
 
 
 /* Use the real free in this function. */
@@ -1621,19 +2031,19 @@ void* _test_calloc(const size_t number_of_elements, const size_t size,
 void _test_free(void* const ptr, const char* file, const int line) {
     unsigned int i;
     char *block = discard_const_p(char, ptr);
-    MallocBlockInfo *block_info;
+    MallocBlockInfo block_info;
 
     if (ptr == NULL) {
         return;
     }
 
     _assert_true(cast_ptr_to_largest_integral_type(ptr), "ptr", file, line);
-    block_info = (MallocBlockInfo*)(block - (MALLOC_GUARD_SIZE +
-                                               sizeof(*block_info)));
+    block_info.ptr = block - (MALLOC_GUARD_SIZE +
+                              sizeof(struct MallocBlockInfoData));
     /* Check the guard blocks. */
     {
         char *guards[2] = {block - MALLOC_GUARD_SIZE,
-                           block + block_info->size};
+                           block + block_info.data->size};
         for (i = 0; i < ARRAY_SIZE(guards); i++) {
             unsigned int j;
             char * const guard = guards[i];
@@ -1643,19 +2053,22 @@ void _test_free(void* const ptr, const char* file, const int line) {
                     cm_print_error(SOURCE_LOCATION_FORMAT
                                    ": error: Guard block of %p size=%lu is corrupt\n"
                                    SOURCE_LOCATION_FORMAT ": note: allocated here at %p\n",
-                                   file, line,
-                                   ptr, (unsigned long)block_info->size,
-                                   block_info->location.file, block_info->location.line,
-                                   &guard[j]);
+                                   file,
+                                   line,
+                                   ptr,
+                                   (unsigned long)block_info.data->size,
+                                   block_info.data->location.file,
+                                   block_info.data->location.line,
+                                   (void *)&guard[j]);
                     _fail(file, line);
                 }
             }
         }
     }
-    list_remove(&block_info->node, NULL, NULL);
+    list_remove(&block_info.data->node, NULL, NULL);
 
-    block = discard_const_p(char, block_info->block);
-    memset(block, MALLOC_FREE_PATTERN, block_info->allocated_size);
+    block = discard_const_p(char, block_info.data->block);
+    memset(block, MALLOC_FREE_PATTERN, block_info.data->allocated_size);
     free(block);
 }
 #define free test_free
@@ -1666,68 +2079,70 @@ void *_test_realloc(void *ptr,
                    const char *file,
                    const int line)
 {
-    MallocBlockInfo *block_info;
+    MallocBlockInfo block_info;
     char *block = ptr;
     size_t block_size = size;
-    void *new;
+    void *new_block;
 
     if (ptr == NULL) {
         return _test_malloc(size, file, line);
     }
 
     if (size == 0) {
+        _test_free(ptr, file, line);
         return NULL;
     }
 
-    block_info = (MallocBlockInfo*)(block - (MALLOC_GUARD_SIZE +
-                                             sizeof(*block_info)));
+    block_info.ptr = block - (MALLOC_GUARD_SIZE +
+                              sizeof(struct MallocBlockInfoData));
 
-    new = _test_malloc(size, file, line);
-    if (new == NULL) {
+    new_block = _test_malloc(size, file, line);
+    if (new_block == NULL) {
         return NULL;
     }
 
-    if (block_info->size < size) {
-        block_size = block_info->size;
+    if (block_info.data->size < size) {
+        block_size = block_info.data->size;
     }
 
-    memcpy(new, ptr, block_size);
+    memcpy(new_block, ptr, block_size);
 
     /* Free previous memory */
     _test_free(ptr, file, line);
 
-    return new;
+    return new_block;
 }
 #define realloc test_realloc
 
 /* Crudely checkpoint the current heap state. */
-static const ListNode* check_point_allocated_blocks() {
+static const ListNode* check_point_allocated_blocks(void) {
     return get_allocated_blocks_list()->prev;
 }
 
 
 /* Display the blocks allocated after the specified check point.  This
  * function returns the number of blocks displayed. */
-static int display_allocated_blocks(const ListNode * const check_point) {
+static size_t display_allocated_blocks(const ListNode * const check_point) {
     const ListNode * const head = get_allocated_blocks_list();
     const ListNode *node;
-    int allocated_blocks = 0;
+    size_t allocated_blocks = 0;
     assert_non_null(check_point);
     assert_non_null(check_point->next);
 
     for (node = check_point->next; node != head; node = node->next) {
-        const MallocBlockInfo * const block_info =
-		(const MallocBlockInfo*)node->value;
-        assert_non_null(block_info);
+        const MallocBlockInfo block_info = {
+            .ptr = discard_const(node->value),
+        };
+        assert_non_null(block_info.ptr);
 
-        if (!allocated_blocks) {
+        if (allocated_blocks == 0) {
             cm_print_error("Blocks allocated...\n");
         }
         cm_print_error(SOURCE_LOCATION_FORMAT ": note: block %p allocated here\n",
-                       block_info->location.file,
-                       block_info->location.line,
-                       block_info->block);
-        allocated_blocks ++;
+                       block_info.data->location.file,
+                       block_info.data->location.line,
+                       block_info.data->block);
+        allocated_blocks++;
     }
     return allocated_blocks;
 }
@@ -1743,9 +2158,13 @@ static void free_allocated_blocks(const ListNode * const check_point) {
     assert_non_null(node);
 
     while (node != head) {
-        MallocBlockInfo * const block_info = (MallocBlockInfo*)node->value;
+        const MallocBlockInfo block_info = {
+            .ptr = discard_const(node->value),
+        };
         node = node->next;
-        free(discard_const_p(char, block_info) + sizeof(*block_info) + MALLOC_GUARD_SIZE);
+        free(discard_const_p(char, block_info.data) +
+             sizeof(struct MallocBlockInfoData) +
+             MALLOC_GUARD_SIZE);
     }
 }
 
@@ -1753,10 +2172,10 @@ static void free_allocated_blocks(const ListNode * const check_point) {
 /* Fail if any any blocks are allocated after the specified check point. */
 static void fail_if_blocks_allocated(const ListNode * const check_point,
                                      const char * const test_name) {
-    const int allocated_blocks = display_allocated_blocks(check_point);
-    if (allocated_blocks) {
+    const size_t allocated_blocks = display_allocated_blocks(check_point);
+    if (allocated_blocks > 0) {
         free_allocated_blocks(check_point);
-        cm_print_error("ERROR: %s leaked %d block(s)\n", test_name,
+        cm_print_error("ERROR: %s leaked %zu block(s)\n", test_name,
                        allocated_blocks);
         exit_test(1);
     }
@@ -1764,18 +2183,34 @@ static void fail_if_blocks_allocated(const ListNode * const check_point,
 
 
 void _fail(const char * const file, const int line) {
-    cm_print_error(SOURCE_LOCATION_FORMAT ": error: Failure!\n", file, line);
+    enum cm_message_output output = cm_get_output();
+
+    switch(output) {
+        case CM_OUTPUT_STDOUT:
+            // IMPORTANT(Ryan): No output this way ...
+            // cm_print_error("[   LINE   ] --- " SOURCE_LOCATION_FORMAT ": error: Failure!", file, line);
+            printf("[   LINE   ] --- " SOURCE_LOCATION_FORMAT ": error: Failure!", file, line);
+            break;
+        default:
+            // IMPORTANT(Ryan): No output this way ...
+            // cm_print_error(SOURCE_LOCATION_FORMAT ": error: Failure!", file, line);
+            printf(SOURCE_LOCATION_FORMAT ": error: Failure!", file, line);
+            break;
+    }
     exit_test(1);
 }
 
 
 #ifndef _WIN32
 static void exception_handler(int sig) {
+    const char *sig_strerror = "";
+
 #ifdef HAVE_STRSIGNAL
-    cm_print_error("Test failed with exception: %s\n", strsignal(sig));
-#else
-    cm_print_error("Test failed with exception: %d\n", sig);
+    sig_strerror = strsignal(sig);
 #endif
+
+    cm_print_error("Test failed with exception: %s(%d)",
+                   sig_strerror, sig);
     exit_test(1);
 }
 
@@ -1896,6 +2331,9 @@ enum cm_printf_type {
     PRINTF_TEST_SKIPPED,
 };
 
+static int xml_printed;
+static int file_append;
+
 static void cmprintf_group_finish_xml(const char *group_name,
                                       size_t total_executed,
                                       size_t total_failed,
@@ -1906,34 +2344,59 @@ static void cmprintf_group_finish_xml(const char *group_name,
 {
     FILE *fp = stdout;
     int file_opened = 0;
+    int multiple_files = 0;
     char *env;
     size_t i;
 
     env = getenv("CMOCKA_XML_FILE");
     if (env != NULL) {
         char buf[1024];
+        int rc;
+
         snprintf(buf, sizeof(buf), "%s", env);
+
+        rc = c_strreplace(buf, sizeof(buf), "%g", group_name, &multiple_files);
+        if (rc < 0) {
+            snprintf(buf, sizeof(buf), "%s", env);
+        }
 
         fp = fopen(buf, "r");
         if (fp == NULL) {
             fp = fopen(buf, "w");
             if (fp != NULL) {
+                file_append = 1;
                 file_opened = 1;
             } else {
                 fp = stderr;
             }
         } else {
             fclose(fp);
-            fp = stderr;
+            if (file_append) {
+                fp = fopen(buf, "a");
+                if (fp != NULL) {
+                    file_opened = 1;
+                    xml_printed = 1;
+                } else {
+                    fp = stderr;
+                }
+            } else {
+                fp = stderr;
+            }
         }
     }
 
-    fprintf(fp, "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n");
+    if (!xml_printed || (file_opened && !file_append)) {
+        fprintf(fp, "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n");
+        if (!file_opened) {
+            xml_printed = 1;
+        }
+    }
+
     fprintf(fp, "<testsuites>\n");
     fprintf(fp, "  <testsuite name=\"%s\" time=\"%.3f\" "
                 "tests=\"%u\" failures=\"%u\" errors=\"%u\" skipped=\"%u\" >\n",
                 group_name,
-                total_runtime * 1000, /* miliseconds */
+                total_runtime, /* seconds */
                 (unsigned)total_executed,
                 (unsigned)total_failed,
                 (unsigned)total_errors,
@@ -1943,7 +2406,7 @@ static void cmprintf_group_finish_xml(const char *group_name,
         struct CMUnitTestState *cmtest = &cm_tests[i];
 
         fprintf(fp, "    <testcase name=\"%s\" time=\"%.3f\" >\n",
-                cmtest->test->name, cmtest->runtime * 1000);
+                cmtest->test->name, cmtest->runtime);
 
         switch (cmtest->status) {
         case CM_TEST_ERROR:
@@ -1985,6 +2448,7 @@ static void cmprintf_group_finish_standard(size_t total_executed,
                                            size_t total_passed,
                                            size_t total_failed,
                                            size_t total_errors,
+                                           size_t total_skipped,
                                            struct CMUnitTestState *cm_tests)
 {
     size_t i;
@@ -1992,6 +2456,18 @@ static void cmprintf_group_finish_standard(size_t total_executed,
     print_message("[==========] %u test(s) run.\n", (unsigned)total_executed);
     print_error("[  PASSED  ] %u test(s).\n",
                 (unsigned)(total_passed));
+
+    if (total_skipped) {
+        print_error("[  SKIPPED ] %"PRIdS " test(s), listed below:\n", total_skipped);
+        for (i = 0; i < total_executed; i++) {
+            struct CMUnitTestState *cmtest = &cm_tests[i];
+
+            if (cmtest->status == CM_TEST_SKIPPED) {
+                print_error("[  SKIPPED ] %s\n", cmtest->test->name);
+            }
+        }
+        print_error("\n %u SKIPPED TEST(S)\n", (unsigned)(total_skipped));
+    }
 
     if (total_failed) {
         print_error("[  FAILED  ] %"PRIdS " test(s), listed below:\n", total_failed);
@@ -2020,7 +2496,7 @@ static void cmprintf_standard(enum cm_printf_type type,
         break;
     case PRINTF_TEST_FAILURE:
         if (error_message != NULL) {
-            print_error("%s\n", error_message);
+            print_error("[  ERROR   ] --- %s\n", error_message);
         }
         print_message("[  FAILED  ] %s\n", test_name);
         break;
@@ -2039,6 +2515,18 @@ static void cmprintf_standard(enum cm_printf_type type,
 static void cmprintf_group_start_tap(const size_t num_tests)
 {
     print_message("1..%u\n", (unsigned)num_tests);
+}
+
+static void cmprintf_group_finish_tap(const char *group_name,
+                                      size_t total_executed,
+                                      size_t total_passed,
+                                      size_t total_skipped)
+{
+    const char *status = "not ok";
+    if (total_passed + total_skipped == total_executed) {
+        status = "ok";
+    }
+    print_message("# %s - %s\n", status, group_name);
 }
 
 static void cmprintf_tap(enum cm_printf_type type,
@@ -2106,7 +2594,7 @@ static void cmprintf_subunit(enum cm_printf_type type,
     case PRINTF_TEST_FAILURE:
         print_message("failure: %s", test_name);
         if (error_message != NULL) {
-            print_message(" [\n%s]\n", error_message);
+            print_message(" [\n%s\n]\n", error_message);
         }
         break;
     case PRINTF_TEST_SKIPPED:
@@ -2157,10 +2645,13 @@ static void cmprintf_group_finish(const char *group_name,
                                     total_passed,
                                     total_failed,
                                     total_errors,
+                                    total_skipped,
                                     cm_tests);
         break;
     case CM_OUTPUT_SUBUNIT:
+        break;
     case CM_OUTPUT_TAP:
+        cmprintf_group_finish_tap(group_name, total_executed, total_passed, total_skipped);
         break;
     case CM_OUTPUT_XML:
         cmprintf_group_finish_xml(group_name,
@@ -2201,6 +2692,16 @@ static void cmprintf(enum cm_printf_type type,
 void cmocka_set_message_output(enum cm_message_output output)
 {
     global_msg_output = output;
+}
+
+void cmocka_set_test_filter(const char *pattern)
+{
+    global_test_filter_pattern = pattern;
+}
+
+void cmocka_set_skip_filter(const char *pattern)
+{
+    global_skip_filter_pattern = pattern;
 }
 
 /****************************************************************************
@@ -2299,7 +2800,7 @@ static int cmocka_run_one_test_or_fixture(const char *function_name,
 
     global_running_test = 1;
 
-    if (setjmp(global_run_test_env) == 0) {
+    if (cm_setjmp(global_run_test_env) == 0) {
         if (test_func != NULL) {
             test_func(state != NULL ? state : &current_state);
 
@@ -2464,6 +2965,7 @@ int _cmocka_run_group_tests(const char *group_name,
     struct CMUnitTestState *cm_tests;
     const ListNode *group_check_point = check_point_allocated_blocks();
     void *group_state = NULL;
+    size_t total_tests = 0;
     size_t total_failed = 0;
     size_t total_passed = 0;
     size_t total_executed = 0;
@@ -2476,21 +2978,43 @@ int _cmocka_run_group_tests(const char *group_name,
     /* Make sure LargestIntegralType is at least the size of a pointer. */
     assert_true(sizeof(LargestIntegralType) >= sizeof(void*));
 
-    cm_tests = (struct CMUnitTestState *)libc_malloc(sizeof(struct CMUnitTestState) * num_tests);
+    cm_tests = libc_calloc(1, sizeof(struct CMUnitTestState) * num_tests);
     if (cm_tests == NULL) {
         return -1;
     }
 
-    cmprintf_group_start(num_tests);
-
     /* Setup cmocka test array */
     for (i = 0; i < num_tests; i++) {
-        cm_tests[i] = (struct CMUnitTestState) {
-            .test = &tests[i],
-            .status = CM_TEST_NOT_STARTED,
-            .state = NULL,
-        };
+        if (tests[i].name != NULL &&
+            (tests[i].test_func != NULL
+             || tests[i].setup_func != NULL
+             || tests[i].teardown_func != NULL)) {
+            if (global_test_filter_pattern != NULL) {
+                int match;
+
+                match = c_strmatch(tests[i].name, global_test_filter_pattern);
+                if (!match) {
+                    continue;
+                }
+            }
+            if (global_skip_filter_pattern != NULL) {
+                int match;
+
+                match = c_strmatch(tests[i].name, global_skip_filter_pattern);
+                if (match) {
+                    continue;
+                }
+            }
+            cm_tests[total_tests] = (struct CMUnitTestState) {
+                .test = &tests[i],
+                .status = CM_TEST_NOT_STARTED,
+                .state = NULL,
+            };
+            total_tests++;
+        }
     }
+
+    cmprintf_group_start(total_tests);
 
     rc = 0;
 
@@ -2505,15 +3029,18 @@ int _cmocka_run_group_tests(const char *group_name,
 
     if (rc == 0) {
         /* Execute tests */
-        for (i = 0; i < num_tests; i++) {
+        for (i = 0; i < total_tests; i++) {
             struct CMUnitTestState *cmtest = &cm_tests[i];
             size_t test_number = i + 1;
 
             cmprintf(PRINTF_TEST_START, test_number, cmtest->test->name, NULL);
 
             if (group_state != NULL) {
-                cm_tests[i].state = group_state;
+                cmtest->state = group_state;
+            } else if (cmtest->test->initial_state  != NULL) {
+                cmtest->state = cmtest->test->initial_state;
             }
+
             rc = cmocka_run_one_tests(cmtest);
             total_executed++;
             total_runtime += cmtest->runtime;
@@ -2549,16 +3076,27 @@ int _cmocka_run_group_tests(const char *group_name,
                         break;
                 }
             } else {
+                char err_msg[2048] = {0};
+
+                snprintf(err_msg, sizeof(err_msg),
+                         "Could not run test: %s",
+                         cmtest->error_message);
+
                 cmprintf(PRINTF_TEST_ERROR,
                          test_number,
                          cmtest->test->name,
-                         "Could not run the test - check test fixtures");
+                         err_msg);
                 total_errors++;
             }
         }
     } else {
+        if (cm_error_message != NULL) {
+            print_error("[  ERROR   ] --- %s\n", cm_error_message);
+            vcm_free_error(cm_error_message);
+            cm_error_message = NULL;
+        }
         cmprintf(PRINTF_TEST_ERROR, 0,
-                 group_name, "Group setup failed");
+                 group_name, "[  FAILED  ] GROUP SETUP");
         total_errors++;
     }
 
@@ -2569,6 +3107,15 @@ int _cmocka_run_group_tests(const char *group_name,
                                       group_teardown,
                                       &group_state,
                                       group_check_point);
+        if (rc != 0) {
+            if (cm_error_message != NULL) {
+                print_error("[  ERROR   ] --- %s\n", cm_error_message);
+                vcm_free_error(cm_error_message);
+                cm_error_message = NULL;
+            }
+            cmprintf(PRINTF_TEST_ERROR, 0,
+                     group_name, "[  FAILED  ] GROUP TEARDOWN");
+        }
     }
 
     cmprintf_group_finish(group_name,
@@ -2580,7 +3127,7 @@ int _cmocka_run_group_tests(const char *group_name,
                           total_runtime,
                           cm_tests);
 
-    for (i = 0; i < num_tests; i++) {
+    for (i = 0; i < total_tests; i++) {
         vcm_free_error(discard_const_p(char, cm_tests[i].error_message));
     }
     libc_free(cm_tests);
@@ -2630,7 +3177,7 @@ int _run_test(
     }
     initialize_testing(function_name);
     global_running_test = 1;
-    if (setjmp(global_run_test_env) == 0) {
+    if (cm_setjmp(global_run_test_env) == 0) {
         Function(state ? state : &current_state);
         fail_if_leftover_values(function_name);
 
@@ -2695,7 +3242,7 @@ int _run_tests(const UnitTest * const tests, const size_t number_of_tests) {
      * when a test setup occurs and popped on tear down.
      */
     TestState* test_states =
-	    (TestState*)malloc(number_of_tests * sizeof(*test_states));
+       (TestState*)malloc(number_of_tests * sizeof(*test_states));
     /* The number of test states which should be 0 at the end */
     long number_of_test_states = 0;
     /* Names of the tests that failed. */
@@ -2831,7 +3378,7 @@ int _run_group_tests(const UnitTest * const tests, const size_t number_of_tests)
     const char *setup_name;
     size_t num_setups = 0;
     UnitTestFunction teardown = NULL;
-    const char *teardown_name;
+    const char *teardown_name = NULL;
     size_t num_teardowns = 0;
     size_t current_test = 0;
     size_t i;
@@ -2842,10 +3389,21 @@ int _run_group_tests(const UnitTest * const tests, const size_t number_of_tests)
     size_t total_failed = 0;
     /* Check point of the heap state. */
     const ListNode * const check_point = check_point_allocated_blocks();
-    const char** failed_names = (const char**)malloc(number_of_tests *
-                                       sizeof(*failed_names));
+    const char **failed_names = NULL;
     void **current_state = NULL;
-    TestState group_state;
+    TestState group_state = {
+        .check_point = NULL,
+    };
+
+    if (number_of_tests == 0) {
+        return -1;
+    }
+
+    failed_names = (const char **)malloc(number_of_tests *
+                                         sizeof(*failed_names));
+    if (failed_names == NULL) {
+        return -2;
+    }
 
     /* Find setup and teardown function */
     for (i = 0; i < number_of_tests; i++) {
@@ -2968,4 +3526,3 @@ int _run_group_tests(const UnitTest * const tests, const size_t number_of_tests)
 
     return (int)total_failed;
 }
-

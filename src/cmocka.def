@@ -1,5 +1,7 @@
 LIBRARY cmocka
 EXPORTS
+    _assert_float_equal
+    _assert_float_not_equal
     _assert_in_range
     _assert_in_set
     _assert_int_equal
@@ -16,6 +18,7 @@ EXPORTS
     _cmocka_run_group_tests
     _expect_any
     _expect_check
+    _expect_function_call
     _expect_in_range
     _expect_in_set
     _expect_memory
@@ -27,6 +30,7 @@ EXPORTS
     _expect_string
     _expect_value
     _fail
+    _function_called
     _mock
     _run_test
     _run_tests
@@ -36,6 +40,10 @@ EXPORTS
     _test_malloc
     _test_realloc
     _will_return
+    cm_print_error
+    cmocka_set_message_output
+    cmocka_set_test_filter
+    cmocka_set_skip_filter
     global_expect_assert_env
     global_expecting_assert
     global_last_failed_assert
