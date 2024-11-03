@@ -48,7 +48,6 @@ int __stdcall IsDebuggerPresent();
  * #include <stddef.h>
  * #include <stdint.h>
  * #include <setjmp.h>
- * #include <stdint.h>
  * @endcode
  *
  * This allows test applications to use custom definitions of C standard
@@ -100,11 +99,14 @@ int __stdcall IsDebuggerPresent();
 #define WILL_RETURN_ALWAYS -1
 #define WILL_RETURN_ONCE -2
 
+#define EXPECT_ALWAYS -1
+#define EXPECT_MAYBE -2
+
 /**
  * @defgroup cmocka_mock Mock Objects
  * @ingroup cmocka
  *
- * Mock objects mock objects are simulated objects that mimic the behavior of
+ * Mock objects are simulated objects that mimic the behavior of
  * real objects. Instead of calling the real objects, the tested object calls a
  * mock object that merely asserts that the correct methods were called, with
  * the expected parameters, in the correct order.
@@ -393,6 +395,44 @@ void expect_check(#function, #parameter, #check_function, const void *check_data
 #define expect_check(function, parameter, check_function, check_data) \
     _expect_check(#function, #parameter, __FILE__, __LINE__, check_function, \
                   cast_to_uintmax_type(check_data), NULL, 1)
+#endif
+
+/*
+ * Add a custom parameter checking function.  If the event parameter is NULL
+ * the event structure is allocated internally by this function.  If event
+ * parameter is provided it must be allocated on the heap and doesn't need to
+ * be deallocated by the caller.
+ */
+#ifdef DOXYGEN
+/**
+ * @brief Add a custom parameter checking function.
+ *
+ * If the event parameter is NULL the event structure is allocated internally
+ * by this function. If the parameter is provided it must be allocated on the
+ * heap and doesn't need to be deallocated by the caller.
+ *
+ * @param[in]  #function  The function to add a custom parameter checking
+ *                        function for.
+ *
+ * @param[in]  #parameter The parameters passed to the function.
+ *
+ * @param[in]  #check_function  The check function to call.
+ *
+ * @param[in]  check_data       The data to pass to the check function.
+ *
+ * @param[in]  count  The count parameter gives the number of times the value
+ *                    should be validated by check_expected(). If count is set
+ *                    to @ref EXPECT_ALWAYS the value will always be returned,
+ *                    and cmocka expects check_expected() to be issued at least
+ *                    once. If count is set to @ref EXPECT_MAYBE, any number of
+ *                    calls to check_expected() is accepted, including zero.
+ *
+ */
+void expect_check_count(#function, #parameter, #check_function, const void *check_data, size_t count);
+#else
+#define expect_check_count(function, parameter, check_function, check_data, count) \
+    _expect_check(#function, #parameter, __FILE__, __LINE__, check_function, \
+                  cast_to_uintmax_type(check_data), NULL, count)
 #endif
 
 #ifdef DOXYGEN
@@ -1495,7 +1535,10 @@ void assert_not_in_set(uintmax_t value, uintmax_t values[], size_t count);
  * created (e.g. expect_function_call()) than consumed with function_called().
  * There are provisions such as ignore_function_calls() which allow this
  * restriction to be circumvented in tests where mock calls for the code under
- * test are not the focus of the test.
+ * test are not the focus of the test. function_called() must be called from
+ * the same thread as expect_function_call(), and that thread must have been
+ * initialized for use by cmocka (see also the [Threading section of the main
+ * documentation page](index.html#main-threads)).
  *
  * The following example illustrates how a unit test instructs cmocka
  * to expect a function_called() from a particular mock,
