@@ -1,6 +1,6 @@
 /*
  * Copyright 2008 Google Inc.
- * Copyright 2014-2020 Andreas Schneider <asn@cryptomilk.org>
+ * Copyright 2014-2022 Andreas Schneider <asn@cryptomilk.org>
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -1683,11 +1683,25 @@ void fail(void);
 
 #ifdef DOXYGEN
 /**
- * @brief Forces the test to not be executed, but marked as skipped
+ * @brief Forces the test to not be executed, but marked as skipped.
  */
 void skip(void);
 #else
 #define skip() _skip(__FILE__, __LINE__)
+#endif
+
+#ifdef DOXYGEN
+/**
+ * @brief Forces the test to be stopped immediately.
+ *
+ * Call stop() to stop a running test.
+ * The test is considered passed if there are no leftover values, otherwise a test failure
+ * is signaled.
+ * Calling stop() is especially useful in mocked functions that do not return, e.g reset the CPU.
+ */
+void stop(void);
+#else
+#define stop() _stop()
 #endif
 
 #ifdef DOXYGEN
@@ -1708,7 +1722,7 @@ void skip(void);
 void fail_msg(const char *msg, ...);
 #else
 #define fail_msg(msg, ...) do { \
-    print_error("ERROR: " msg "\n", ##__VA_ARGS__); \
+    cm_print_error("ERROR: " msg "\n", ##__VA_ARGS__); \
     fail(); \
 } while (0)
 #endif
@@ -2360,6 +2374,8 @@ CMOCKA_NORETURN void _fail(const char * const file, const int line);
 
 CMOCKA_NORETURN void _skip(const char * const file, const int line);
 
+CMOCKA_NORETURN void _stop(void);
+
 /* Test runner */
 int _cmocka_run_group_tests(const char *group_name,
                             const struct CMUnitTest * const tests,
@@ -2372,26 +2388,30 @@ void print_message(const char* const format, ...) CMOCKA_PRINTF_ATTRIBUTE(1, 2);
 void print_error(const char* const format, ...) CMOCKA_PRINTF_ATTRIBUTE(1, 2);
 void vprint_message(const char* const format, va_list args) CMOCKA_PRINTF_ATTRIBUTE(1, 0);
 void vprint_error(const char* const format, va_list args) CMOCKA_PRINTF_ATTRIBUTE(1, 0);
+void cm_print_error(const char* const format, ...) CMOCKA_PRINTF_ATTRIBUTE(1, 2);
 
 enum cm_message_output {
-    CM_OUTPUT_STDOUT,
-    CM_OUTPUT_SUBUNIT,
-    CM_OUTPUT_TAP,
-    CM_OUTPUT_XML,
+    CM_OUTPUT_STANDARD = 1,
+    CM_OUTPUT_SUBUNIT = 2,
+    CM_OUTPUT_TAP = 4,
+    CM_OUTPUT_XML = 8,
 };
 
 /**
  * @brief Function to set the output format for a test.
  *
- * The ouput format for the test can either be set globally using this
- * function or overriden with environment variable CMOCKA_MESSAGE_OUTPUT.
+ * The output format(s) for the test can either be set globally using this
+ * function or overwritten with environment variable CMOCKA_MESSAGE_OUTPUT.
  *
- * The environment variable can be set to either STDOUT, SUBUNIT, TAP or XML.
+ * The environment variable can be set to STANDARD, SUBUNIT, TAP or XML.
+ * Multiple outputs separated with comma are permitted.
+ * (e.g. export CMOCKA_MESSAGE_OUTPUT=STANDARD,XML)
  *
- * @param[in] output    The output format to use for the test.
+ * @param[in] output    The output format from cm_message_output to use for the
+ *                      test. For multiple outputs OR options together.
  *
  */
-void cmocka_set_message_output(enum cm_message_output output);
+void cmocka_set_message_output(uint32_t output);
 
 
 /**

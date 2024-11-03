@@ -1,5 +1,5 @@
 /*
- * Copyright 2020 Andreas Schneider <asn@cryptomilk.org>
+ * Copyright 2022 Carsten Lange
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,26 +16,34 @@
 
 #include <stdarg.h>
 #include <stddef.h>
-#include <stdint.h>
 #include <setjmp.h>
+#include <stdint.h>
 #include <cmocka.h>
 
-static void torture_string_equal(void **state)
+static void mock_test_a_called(void)
 {
-    (void)state; /* unused */
-    assert_string_equal("wurst", "wurst");
+    function_called();
 }
 
-static void torture_string_not_equal(void **state)
+static void mock_test_b_called(void)
 {
-    (void)state; /* unused */
-    assert_string_not_equal("wurst", "brot");
+    function_called();
 }
+
+static void test_check_stop(void **state) {
+    (void)state; /* unused */
+
+    expect_function_call(mock_test_a_called);
+
+    mock_test_a_called();
+    stop();
+    mock_test_b_called(); /* not called due to calling stop() */
+}
+
 
 int main(void) {
     const struct CMUnitTest tests[] = {
-        cmocka_unit_test(torture_string_equal),
-        cmocka_unit_test(torture_string_not_equal),
+        cmocka_unit_test(test_check_stop),
     };
 
     return cmocka_run_group_tests(tests, NULL, NULL);

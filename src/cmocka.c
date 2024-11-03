@@ -297,12 +297,10 @@ static void initialize_testing(const char *test_name);
 /* This must be called at the end of a test to free() allocated structures. */
 static void teardown_testing(const char *test_name);
 
-static enum cm_message_output cm_get_output(void);
+static uint32_t cm_get_output(void);
 
 static int cm_error_message_enabled = 1;
 static CMOCKA_THREAD char *cm_error_message;
-
-void cm_print_error(const char * const format, ...) CMOCKA_PRINTF_ATTRIBUTE(1, 2);
 
 /*
  * Keeps track of the calling context returned by setenv() so that the fail()
@@ -317,6 +315,7 @@ jmp_buf global_expect_assert_env;
 int global_expecting_assert = 0;
 const char *global_last_failed_assert = NULL;
 static int global_skip_test;
+static int global_stop_test;
 
 /* Keeps a map of the values that functions will have to return to provide */
 /* mocked interfaces. */
@@ -338,7 +337,7 @@ static CMOCKA_THREAD SourceLocation global_last_call_ordering_location;
 /* List of all currently allocated blocks. */
 static CMOCKA_THREAD ListNode global_allocated_blocks;
 
-static enum cm_message_output global_msg_output = CM_OUTPUT_STDOUT;
+static uint32_t global_msg_output = CM_OUTPUT_STANDARD;
 
 static const char *global_test_filter_pattern;
 
@@ -442,6 +441,15 @@ void _skip(const char * const file, const int line)
 {
     cm_print_error(SOURCE_LOCATION_FORMAT ": Skipped!\n", file, line);
     global_skip_test = 1;
+    exit_test(1);
+
+    /* Unreachable */
+    exit(-1);
+}
+
+void _stop(void)
+{
+    global_stop_test = 1;
     exit_test(1);
 
     /* Unreachable */
@@ -581,15 +589,14 @@ void initialize_testing(const char *test_name) {
     initialize_source_location(&global_last_parameter_location);
 }
 
-
-static void fail_if_leftover_values(const char *test_name) {
-    int error_occurred = 0;
+static int has_leftover_values(const char *test_name) {
+    int leftover_values = 0;
     (void)test_name;
     remove_always_return_values(&global_function_result_map_head, 1);
     if (check_for_leftover_values(
             &global_function_result_map_head,
             "Has remaining non-returned values", 1)) {
-        error_occurred = 1;
+        leftover_values = 1;
     }
 
     remove_always_return_values(&global_function_parameter_map_head, 2);
@@ -597,15 +604,19 @@ static void fail_if_leftover_values(const char *test_name) {
             &global_function_parameter_map_head,
             "Parameter still has values that haven't been checked",
             2)) {
-        error_occurred = 1;
+        leftover_values = 1;
     }
 
     remove_always_return_values_from_list(&global_call_ordering_head);
     if (check_for_leftover_values_list(&global_call_ordering_head,
         "Function was expected to be called but was not")) {
-        error_occurred = 1;
+        leftover_values = 1;
     }
-    if (error_occurred) {
+    return (leftover_values);
+}
+
+static void fail_if_leftover_values(const char *test_name) {
+    if (has_leftover_values(test_name) != 0) {
         exit_test(1);
     }
 }
@@ -2346,15 +2357,16 @@ static void fail_if_blocks_allocated(const ListNode * const check_point,
 
 
 void _fail(const char * const file, const int line) {
-    enum cm_message_output output = cm_get_output();
+    uint32_t output = cm_get_output();
 
-    switch(output) {
-        case CM_OUTPUT_STDOUT:
-            cm_print_error("[   LINE   ] --- " SOURCE_LOCATION_FORMAT ": error: Failure!", file, line);
-            break;
-        default:
-            cm_print_error(SOURCE_LOCATION_FORMAT ": error: Failure!", file, line);
-            break;
+    if (output & CM_OUTPUT_STANDARD) {
+        cm_print_error("[   LINE   ] --- " SOURCE_LOCATION_FORMAT
+                       ": error: Failure!",
+                       file, line);
+    }
+    if ((output & CM_OUTPUT_SUBUNIT) || (output & CM_OUTPUT_TAP) ||
+        (output & CM_OUTPUT_XML)) {
+        cm_print_error(SOURCE_LOCATION_FORMAT ": error: Failure!", file, line);
     }
     exit_test(1);
 
@@ -2471,25 +2483,60 @@ void print_error(const char* const format, ...) {
 }
 
 /* New formatter */
-static enum cm_message_output cm_get_output(void)
+static uint32_t cm_get_output(void)
 {
-    enum cm_message_output output = global_msg_output;
-    char *env;
+    static bool env_checked = false;
+    char *env = NULL;
+    size_t len = 0;
+    uint32_t new_output = 0;
+    char *str_output_list = NULL;
+    char *str_output = NULL;
+    char *saveptr = NULL;
+
+    if (env_checked) {
+        return global_msg_output;
+    }
 
     env = getenv("CMOCKA_MESSAGE_OUTPUT");
-    if (env != NULL) {
-        if (strcasecmp(env, "STDOUT") == 0) {
-            output = CM_OUTPUT_STDOUT;
-        } else if (strcasecmp(env, "SUBUNIT") == 0) {
-            output = CM_OUTPUT_SUBUNIT;
-        } else if (strcasecmp(env, "TAP") == 0) {
-            output = CM_OUTPUT_TAP;
-        } else if (strcasecmp(env, "XML") == 0) {
-            output = CM_OUTPUT_XML;
+    if (env == NULL) {
+        return global_msg_output;
+    }
+
+    len = strlen(env);
+    if (len == 0 || len > 32) {
+        return global_msg_output;
+    }
+
+    str_output_list = strdup(env);
+    if (str_output_list == NULL) {
+        return global_msg_output;
+    }
+
+    for (str_output = strtok_r(str_output_list, ",", &saveptr);
+         str_output != NULL;
+         str_output = strtok_r(NULL, ",", &saveptr)) {
+        if (strcasecmp(str_output, "STANDARD") == 0) {
+            new_output |= CM_OUTPUT_STANDARD;
+        } else if (strcasecmp(str_output, "STDOUT") == 0) {
+            new_output |= CM_OUTPUT_STANDARD;
+        } else if (strcasecmp(str_output, "SUBUNIT") == 0) {
+            new_output |= CM_OUTPUT_SUBUNIT;
+        } else if (strcasecmp(str_output, "TAP") == 0) {
+            new_output |= CM_OUTPUT_TAP;
+        } else if (strcasecmp(str_output, "XML") == 0) {
+            new_output |= CM_OUTPUT_XML;
         }
     }
 
-    return output;
+    libc_free(str_output_list);
+
+    if (new_output != 0) {
+        global_msg_output = new_output;
+    }
+
+    env_checked = true;
+
+    return global_msg_output;
 }
 
 enum cm_printf_type {
@@ -2793,21 +2840,15 @@ static void cmprintf_subunit(enum cm_printf_type type,
 static void cmprintf_group_start(const char *group_name,
                                  const size_t num_tests)
 {
-    enum cm_message_output output;
+    uint32_t output;
 
     output = cm_get_output();
 
-    switch (output) {
-    case CM_OUTPUT_STDOUT:
+    if (output & CM_OUTPUT_STANDARD) {
         cmprintf_group_start_standard(group_name, num_tests);
-        break;
-    case CM_OUTPUT_SUBUNIT:
-        break;
-    case CM_OUTPUT_TAP:
+    }
+    if (output & CM_OUTPUT_TAP) {
         cmprintf_group_start_tap(num_tests);
-        break;
-    case CM_OUTPUT_XML:
-        break;
     }
 }
 
@@ -2820,12 +2861,11 @@ static void cmprintf_group_finish(const char *group_name,
                                   double total_runtime,
                                   struct CMUnitTestState *cm_tests)
 {
-    enum cm_message_output output;
+    uint32_t output;
 
     output = cm_get_output();
 
-    switch (output) {
-    case CM_OUTPUT_STDOUT:
+    if (output & CM_OUTPUT_STANDARD) {
         cmprintf_group_finish_standard(group_name,
                                        total_executed,
                                        total_passed,
@@ -2833,16 +2873,14 @@ static void cmprintf_group_finish(const char *group_name,
                                        total_errors,
                                        total_skipped,
                                        cm_tests);
-        break;
-    case CM_OUTPUT_SUBUNIT:
-        break;
-    case CM_OUTPUT_TAP:
+    }
+    if (output & CM_OUTPUT_TAP) {
         cmprintf_group_finish_tap(group_name,
                                   total_executed,
                                   total_passed,
                                   total_skipped);
-        break;
-    case CM_OUTPUT_XML:
+    }
+    if (output & CM_OUTPUT_XML) {
         cmprintf_group_finish_xml(group_name,
                                   total_executed,
                                   total_failed,
@@ -2850,7 +2888,6 @@ static void cmprintf_group_finish(const char *group_name,
                                   total_skipped,
                                   total_runtime,
                                   cm_tests);
-        break;
     }
 }
 
@@ -2859,26 +2896,22 @@ static void cmprintf(enum cm_printf_type type,
                      const char *test_name,
                      const char *error_message)
 {
-    enum cm_message_output output;
+    uint32_t output;
 
     output = cm_get_output();
 
-    switch (output) {
-    case CM_OUTPUT_STDOUT:
+    if (output & CM_OUTPUT_STANDARD) {
         cmprintf_standard(type, test_name, error_message);
-        break;
-    case CM_OUTPUT_SUBUNIT:
+    }
+    if (output & CM_OUTPUT_SUBUNIT) {
         cmprintf_subunit(type, test_name, error_message);
-        break;
-    case CM_OUTPUT_TAP:
+    }
+    if (output & CM_OUTPUT_TAP) {
         cmprintf_tap(type, test_number, test_name, error_message);
-        break;
-    case CM_OUTPUT_XML:
-        break;
     }
 }
 
-void cmocka_set_message_output(enum cm_message_output output)
+void cmocka_set_message_output(uint32_t output)
 {
     global_msg_output = output;
 }
@@ -3015,6 +3048,12 @@ static int cmocka_run_one_test_or_fixture(const char *function_name,
         /* TEST FAILED */
         global_running_test = 0;
         rc = -1;
+        if (global_stop_test) {
+            if (has_leftover_values(function_name) == 0) {
+                rc = 0;
+            }
+            global_stop_test = 0;
+        }
     }
     teardown_testing(function_name);
 
