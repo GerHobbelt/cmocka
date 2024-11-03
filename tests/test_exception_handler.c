@@ -4,20 +4,14 @@
 #include <stdint.h>
 #include <cmocka.h>
 
-#include <stdlib.h>
-
-struct test_segv {
-    int x;
-    int y;
-};
+#include <signal.h>
 
 static void test_segfault_recovery(void **state)
 {
-    struct test_segv *s = NULL;
+    (void)state; /* unused */
 
-    (void) state; /* unused */
-
-    s->x = 1;
+    /* Raise segmentation fault */
+    raise(SIGSEGV);
 }
 
 static void test_segfault_recovery1(void **state)
@@ -36,11 +30,11 @@ static void test_segfault_recovery3(void **state)
 }
 
 int main(void) {
-    const struct CMUnitTest tests[] = {
+    const struct CMUnitTest exception_tests[] = {
         cmocka_unit_test(test_segfault_recovery1),
         cmocka_unit_test(test_segfault_recovery2),
         cmocka_unit_test(test_segfault_recovery3),
     };
 
-    return cmocka_run_group_tests(tests, NULL, NULL);
+    return cmocka_run_group_tests(exception_tests, NULL, NULL);
 }
